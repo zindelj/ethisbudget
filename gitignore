@@ -1,0 +1,25 @@
+# Data directories (confidential)
+data/
+data_raw/
+app/data/
+
+# Excel and CSV files (anywhere in project)
+*.xlsx
+*.xls
+*.csv
+
+# R-specific
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj.user/
+
+# renv (keep lock file, ignore library)
+renv/library/
+renv/staging/
+renv/sandbox/
+renv/python/
+
+# OS
+.DS_Store
+Thumbs.db
