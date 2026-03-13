@@ -1,4 +1,25 @@
-.Rproj.user
+# Data directories (confidential)
+data/
+data_raw/
+app/data/
+old stuff/
+
+# Excel and CSV files
+*.xlsx
+*.xls
+*.csv
+
+# R-specific
 .Rhistory
 .RData
 .Ruserdata
+.Rproj.user
+
+# renv
+renv/library/
+renv/staging/
+renv/sandbox/
+
+# OS
+.DS_Store
+Thumbs.db
