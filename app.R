@@ -74,6 +74,89 @@ read_zahlungsplan <- function(f, dummy_date = as_date("2025-08-01")) {
 
 safe_max_date <- function(x) { x <- x[!is.na(x)]; if (length(x) == 0) NA_Date_ else max(x) }
 
+
+# ================================================================
+# Spending categories
+# ================================================================
+CATEGORY_MAP <- c(
+  # Salary
+  "Lohnaufwand"             = "Salary",
+  "Personalkosten"          = "Salary",
+  "Pensionskasse"           = "Salary",
+  "SUVA"                    = "Salary",
+  "ALV"                     = "Salary",
+  "AHV"                     = "Salary",
+  "FAK-Beiträge"            = "Salary",
+  "Fam.zul."                = "Salary",
+  "Verwalt.aufw.PUBLICA"    = "Salary",
+
+  # Consumables
+  "Laborwaren"              = "Consumables",
+  "Biol. Präp.& Chemika"    = "Consumables",
+  "Verbrauchsmaterial"      = "Consumables",
+  "Üb. Materialaufwand"     = "Consumables",
+  "EDV-Verbrauchsmat."      = "Consumables",
+  "IT-Verbrauchsmat."       = "Consumables",
+  "Halb-&Fertigpdt.Komp"    = "Consumables",
+  "Labortiere/Tierhaltg"    = "Consumables",
+
+  # Equipment
+  "Maschinen, Geräte"       = "Equipment",
+  "Geräte, Maschinen"       = "Equipment",
+  "Hardware bis 10'000"     = "Equipment",
+  "Wäscheautomaten"         = "Equipment",
+  "Unterh, Rep Mobilien"    = "Equipment",
+  "Mobiliar & Einricht."    = "Equipment",
+
+  # IT, Office & Publications
+  "Software"                = "IT, Office & Publications",
+  "Software (nicht akt)"    = "IT, Office & Publications",
+  "IT und Telekomm."        = "IT, Office & Publications",
+  "Monographien"            = "IT, Office & Publications",
+  "Drucksachen, Repro"      = "IT, Office & Publications",
+  "Büromaterial"            = "IT, Office & Publications",
+
+  # Travel, Events & Training
+  "Flugreisen"              = "Travel, Events & Training",
+  "Bahn, ÖV-Mittel"         = "Travel, Events & Training",
+  "Unterkunft"              = "Travel, Events & Training",
+  "Reisekostenzurückerst."    = "Travel, Events & Training",
+  "Sachtransporte"          = "Travel, Events & Training",
+  "Kurier,Frachten"         = "Travel, Events & Training",
+  "Seminare u. Tagungen"    = "Travel, Events & Training",
+  "Aus- und Weiterbild."    = "Travel, Events & Training",
+  "Aus- & Weiterbildung"    = "Travel, Events & Training",
+  "ETH-interne Anlässe"     = "Travel, Events & Training",
+  "Repräsentationspesen"    = "Travel, Events & Training",
+
+  # Internal charges
+  "ILV TPF bud.r.Ko-Ver"    = "Internal charges",
+  "Übr. DL ETH-nah.Einh"    = "Internal charges",
+  "Kostenübernahme"         = "Internal charges",
+  "Gebühren"                = "Internal charges",
+  "Wirtschaftsor. Fors."    = "Internal charges",
+  "Schenkungen"             = "Internal charges",
+  "Personalrekrutierung"    = "Internal charges",
+
+  # Other
+  "Reserve Jahresabr"       = "Other",
+  "mehrere"                 = "Other"
+)
+
+CATEGORY_COLORS <- c(
+  "Salary"                    = "#4682B4",
+  "Consumables"               = "#52A868",
+  "Equipment"                 = "#D28C3C",
+  "IT, Office & Publications" = "#9664B4",
+  "Travel, Events & Training" = "#C8645A",
+  "Internal charges"          = "#828282",
+  "Other"                     = "#B4AA96"
+)
+
+CATEGORY_ORDER <- c("Salary","Consumables","Equipment",
+                    "IT, Office & Publications","Travel, Events & Training",
+                    "Internal charges","Other")
+
 # ================================================================
 # Load all static data from data_raw/
 # ================================================================
@@ -144,7 +227,8 @@ load_all_data <- function(ep_path) {
       id           = canonical_id(kontierung),
       month        = floor_date(buch_dat, "month"),
       actual_income   = if_else(betrag_in_bw < 0, -betrag_in_bw, 0),
-      actual_spending = if_else(betrag_in_bw > 0,  betrag_in_bw, 0)
+      actual_spending = if_else(betrag_in_bw > 0,  betrag_in_bw, 0),
+      category        = coalesce(CATEGORY_MAP[kurztext], "Other")
     )
 
   ist_monthly <- ist_raw |>
@@ -216,36 +300,70 @@ make_psp_plot <- function(psp_id, d) {
   label <- konten |> filter(id == psp_id) |> pull(bezeichnung) |> first()
   title <- paste0(psp_id, if (!is.na(label)) paste0(" — ", label) else "")
 
-  cash_long <- ts |>
-    select(month, planned_income, actual_income, expected_burn, actual_spending) |>
+  # Category spending (stacked)
+  cat_monthly <- d$ist_raw |>
+    filter(id == psp_id, actual_spending > 0) |>
+    group_by(month, category) |>
+    summarise(value = sum(actual_spending, na.rm = TRUE), .groups = "drop") |>
+    mutate(category = factor(category, levels = CATEGORY_ORDER))
+
+  # Income bars (dodged)
+  income_long <- ts |>
+    select(month, planned_income, actual_income) |>
     pivot_longer(-month, names_to = "series", values_to = "value") |>
-    mutate(
-      kind   = if_else(series %in% c("planned_income", "actual_income"), "Income", "Spending"),
-      series = factor(series, levels = c("planned_income","actual_income","expected_burn","actual_spending"))
-    )
+    mutate(series = factor(series, levels = c("planned_income","actual_income")))
 
   year_lines <- tibble(x = seq(floor_date(min(ts$month), "year"),
                                 ceiling_date(max(ts$month), "year"), by = "1 year"))
 
-  ggplot() +
+  p_income <- ggplot() +
     geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
-    geom_col(data = cash_long, aes(x = month, y = value, fill = series),
+    geom_col(data = income_long, aes(x = month, y = value, fill = series),
              position = "dodge", width = 25, alpha = 0.85) +
+    scale_fill_brewer(palette = "Set2") +
+    scale_x_date(date_breaks = "1 month", date_labels = "%b",
+                 expand = expansion(mult = c(0.01, 0.02))) +
+    scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
+    labs(title = title, x = NULL, y = "CHF (Income)", fill = "Income") +
+    theme_bw() +
+    theme(plot.title = element_text(size = 14, face = "bold"),
+          panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          axis.text.x = element_text(size = 6, angle = 90, vjust = 0.5, hjust = 1),
+          legend.position = "bottom")
+
+  p_spending <- ggplot() +
+    geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
+    geom_col(data = cat_monthly, aes(x = month, y = value, fill = category),
+             position = "stack", width = 25, alpha = 0.85) +
+    geom_step(data = ts, aes(x = month, y = expected_burn),
+              linetype = "dashed", linewidth = 0.7, color = "grey30") +
+    scale_fill_manual(values = CATEGORY_COLORS, drop = FALSE) +
+    scale_x_date(date_breaks = "1 month", date_labels = "%b",
+                 expand = expansion(mult = c(0.01, 0.02))) +
+    scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
+    labs(x = NULL, y = "CHF (Spending)", fill = "Category") +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          axis.text.x = element_text(size = 6, angle = 90, vjust = 0.5, hjust = 1),
+          legend.position = "bottom")
+
+  p_balance <- ggplot() +
+    geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
     geom_line(data = ts, aes(x = month, y = actual_balance,   linetype = balance_label),
               linewidth = 1.2, na.rm = TRUE) +
     geom_line(data = ts, aes(x = month, y = expected_balance, linetype = "Expected balance"),
               linewidth = 1.2) +
-    facet_wrap(~ kind, scales = "free_y", ncol = 1) +
-    scale_fill_brewer(palette = "Set2") +
+    geom_hline(yintercept = 0, color = "firebrick", linewidth = 0.5) +
     scale_x_date(date_breaks = "1 month", date_labels = "%b",
                  expand = expansion(mult = c(0.01, 0.02))) +
-    labs(title = title, x = "Month", y = "CHF", fill = "Series", linetype = "") +
+    scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
+    labs(x = "Month", y = "CHF (Balance)", linetype = "") +
     theme_bw() +
-    theme(plot.title      = element_text(size = 14, face = "bold"),
-          panel.grid.major = element_blank(),
-          panel.grid.minor = element_blank(),
-          axis.text.x     = element_text(size = 6, angle = 90, vjust = 0.5, hjust = 1),
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          axis.text.x = element_text(size = 6, angle = 90, vjust = 0.5, hjust = 1),
           legend.position = "bottom")
+
+  gridExtra::grid.arrange(p_income, p_spending, p_balance, ncol = 1, heights = c(1, 1, 1))
 }
 
 # ================================================================
@@ -290,6 +408,13 @@ compute_extra_cost <- function(months_vec, d, new_hires, headcount, burn_window_
     }
   }
   extra
+}
+
+
+interpolate_balance <- function(df, by = "week") {
+  date_seq <- seq(min(df$month), max(df$month), by = by)
+  tibble(month = date_seq) |>
+    mutate(balance = approx(df$month, df$balance, xout = month)$y)
 }
 
 # ================================================================
@@ -412,13 +537,38 @@ make_forecast_plot <- function(d, burn_window_months = 6,
     else " | No runout within horizon"
   )
 
+  # Ribbon data for future balance (Balance facet)
+  ts_fi <- interpolate_balance(ts_future)
+  ribbon_pos <- ts_fi |>
+    transmute(month, ymin = 0, ymax = pmax(balance, 0),
+              panel = factor("Balance", levels = c("Cashflow","Balance")))
+  ribbon_neg <- ts_fi |>
+    transmute(month, ymin = pmin(balance, 0), ymax = 0,
+              panel = factor("Balance", levels = c("Cashflow","Balance")))
+
+  end_balance   <- last(ts_future$balance)
+  end_month     <- last(ts_future$month)
+  end_label     <- paste0(if (end_balance >= 0) "Expected: +" else "Expected: ",
+                          format(round(end_balance), big.mark = "'"),
+                          " CHF\nat end of horizon (", format(end_month, "%b %Y"), ")")
+  end_label_df  <- tibble(month = end_month, value = end_balance,
+                           label = end_label,
+                           panel = factor("Balance", levels = c("Cashflow","Balance")))
+
   ggplot() +
+    geom_ribbon(data = ribbon_pos, aes(x = month, ymin = ymin, ymax = ymax),
+                fill = "forestgreen", alpha = 0.25, inherit.aes = FALSE) +
+    geom_ribbon(data = ribbon_neg, aes(x = month, ymin = ymin, ymax = ymax),
+                fill = "firebrick", alpha = 0.25, inherit.aes = FALSE) +
     geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.35) +
     geom_vline(xintercept = start_future, linetype = "dotted", linewidth = 0.8) +
     geom_col(data = bars_all, aes(x = month, y = value, fill = series),
              position = "dodge", width = 25, alpha = 0.85) +
     geom_line(data = bal_all, aes(x = month, y = value, linetype = series), linewidth = 1.2) +
     geom_hline(yintercept = 0, color = "firebrick", linewidth = 0.6) +
+    geom_label(data = end_label_df, aes(x = month, y = value, label = label),
+               inherit.aes = FALSE, size = 2.8, hjust = 1, vjust = 0.5,
+               fill = if (end_balance >= 0) "honeydew" else "mistyrose", label.size = 0.3) +
     facet_wrap(~ panel, scales = "free_y", ncol = 1) +
     scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
     scale_fill_brewer(palette = "Set2") +
@@ -559,13 +709,39 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6,
     else " | No runout within horizon"
   )
 
+  # Ribbon data for future balance (Balance facet)
+  ts_fi <- interpolate_balance(ts_future)
+  ribbon_pos <- ts_fi |>
+    transmute(month, ymin = 0, ymax = pmax(balance, 0),
+              panel = factor("Balance", levels = c("Cashflow","Balance")))
+  ribbon_neg <- ts_fi |>
+    transmute(month, ymin = pmin(balance, 0), ymax = 0,
+              panel = factor("Balance", levels = c("Cashflow","Balance")))
+
+  end_balance  <- last(ts_future$balance)
+  end_month    <- last(ts_future$month)
+  end_date_lbl <- if (!is.na(end_date)) end_date else end_month
+  end_label    <- paste0(if (end_balance >= 0) "Expected: +" else "Expected: ",
+                          format(round(end_balance), big.mark = "'"),
+                          " CHF\nat end of runtime (", format(end_date_lbl, "%b %Y"), ")")
+  end_label_df <- tibble(month = end_month, value = end_balance,
+                          label = end_label,
+                          panel = factor("Balance", levels = c("Cashflow","Balance")))
+
   ggplot() +
+    geom_ribbon(data = ribbon_pos, aes(x = month, ymin = ymin, ymax = ymax),
+                fill = "forestgreen", alpha = 0.25, inherit.aes = FALSE) +
+    geom_ribbon(data = ribbon_neg, aes(x = month, ymin = ymin, ymax = ymax),
+                fill = "firebrick", alpha = 0.25, inherit.aes = FALSE) +
     geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.35) +
     geom_vline(xintercept = start_future, linetype = "dotted", linewidth = 0.8) +
     geom_col(data = bars_all, aes(x = month, y = value, fill = series),
              position = "dodge", width = 25, alpha = 0.85) +
     geom_line(data = bal_all, aes(x = month, y = value, linetype = series), linewidth = 1.2) +
     geom_hline(yintercept = 0, color = "firebrick", linewidth = 0.6) +
+    geom_label(data = end_label_df, aes(x = month, y = value, label = label),
+               inherit.aes = FALSE, size = 2.8, hjust = 1, vjust = 0.5,
+               fill = if (end_balance >= 0) "honeydew" else "mistyrose", label.size = 0.3) +
     facet_wrap(~ panel, scales = "free_y", ncol = 1) +
     scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
     scale_fill_brewer(palette = "Set2") +
@@ -609,12 +785,12 @@ ui <- page_navbar(
         uiOutput("ui_psp_select"),
         helpText("Actual balance ends at last available data month.")
       ),
-      card(plotOutput("plot_monitoring", height = "600px"))
+      card(plotOutput("plot_monitoring", height = "900px"))
     )
   ),
 
   nav_panel("📊 Monitoring (All PSPs)",
-    card(plotOutput("plot_monitoring_all", height = "700px"))
+    card(plotOutput("plot_monitoring_all", height = "900px"))
   ),
 
   nav_panel("🔮 Forecast (per PSP)",
@@ -705,14 +881,16 @@ server <- function(input, output, session) {
     konten          <- d$konten
     ist_monthly     <- d$ist_monthly
     planned_income_m<- d$planned_income_m
+    expected_burn   <- d$expected_burn
     today_month     <- d$reference_date
 
     startup_ids      <- konten |> filter(typ == "Startup")      |> pull(id)
     kostenstelle_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
     reserve_ids      <- konten |> filter(typ == "Reserve")      |> pull(id)
     exclude_ids      <- konten |> filter(typ == "Erlöse")       |> pull(id)
+    exclude_all      <- c(startup_ids, exclude_ids)
 
-    ist_ns <- ist_monthly |> filter(!id %in% c(startup_ids, exclude_ids))
+    ist_ns <- ist_monthly |> filter(!id %in% exclude_all)
 
     past_income_ist <- ist_ns |>
       filter(!id %in% c(kostenstelle_ids, reserve_ids)) |>
@@ -741,37 +919,78 @@ server <- function(input, output, session) {
              total_spending = spending,
              balance        = cumsum(total_income - total_spending))
 
+    # Portfolio-level expected burn (sum across all non-excluded PSPs)
+    exp_burn_all <- expected_burn |>
+      filter(!id %in% exclude_all, month <= today_month) |>
+      group_by(month) |>
+      summarise(expected_burn = sum(expected_burn, na.rm = TRUE), .groups = "drop")
+
+    ts <- ts |> left_join(exp_burn_all, by = "month") |>
+      mutate(expected_burn = replace_na(expected_burn, 0))
+
+    # Category spending across all PSPs
+    cat_monthly_all <- d$ist_raw |>
+      filter(!id %in% exclude_all, actual_spending > 0) |>
+      group_by(month, category) |>
+      summarise(value = sum(actual_spending, na.rm = TRUE), .groups = "drop") |>
+      mutate(category = factor(category, levels = CATEGORY_ORDER))
+
+    income_long <- ts |>
+      select(month, total_income) |>
+      pivot_longer(-month, names_to = "series", values_to = "value")
+
     year_lines <- tibble(x = seq(floor_date(min(ts$month), "year"),
                                   ceiling_date(max(ts$month), "year"), by = "1 year"))
 
-    bars_long <- ts |>
-      select(month, total_income, total_spending) |>
-      pivot_longer(c(total_income, total_spending), names_to = "series", values_to = "value") |>
-      mutate(series = factor(series, levels = c("total_income", "total_spending")))
-
-    ggplot() +
-      geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.35) +
-      geom_col(data = bars_long, aes(x = month, y = value, fill = series),
+    p_income <- ggplot() +
+      geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
+      geom_col(data = income_long, aes(x = month, y = value, fill = series),
                position = "dodge", width = 25, alpha = 0.85) +
-      geom_line(data = ts, aes(x = month, y = balance), color = "steelblue",
-                linewidth = 1.4) +
-      geom_hline(yintercept = 0, color = "firebrick", linewidth = 0.6) +
-      scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
       scale_fill_brewer(palette = "Set2") +
       scale_x_date(date_breaks = "1 month", date_labels = "%b",
                    expand = expansion(mult = c(0.01, 0.02))) +
-      labs(title    = "Monitoring: Total Balance (all PSPs excl. Startup & Erlöse)",
-           subtitle = paste0("Data up to: ", format(today_month, "%Y-%m"),
-                             " | Current balance: ",
-                             format(round(last(ts$balance)), big.mark = "'"), " CHF"),
-           x = "Month", y = "CHF", fill = "") +
+      scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
+      labs(title = paste0("Monitoring: All PSPs (excl. Startup & Erlöse)
+Data up to: ",
+                          format(today_month, "%Y-%m"), " | Balance: ",
+                          format(round(last(ts$balance)), big.mark = "'"), " CHF"),
+           x = NULL, y = "CHF (Income)", fill = "") +
       theme_bw() +
-      theme(plot.title       = element_text(size = 14, face = "bold"),
-            plot.subtitle    = element_text(size = 9),
-            panel.grid.major = element_blank(),
-            panel.grid.minor = element_blank(),
-            axis.text.x      = element_text(size = 6, angle = 90, vjust = 0.5, hjust = 1),
-            legend.position  = "bottom")
+      theme(plot.title = element_text(size = 12, face = "bold"),
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+            axis.text.x = element_text(size = 6, angle = 90, vjust = 0.5, hjust = 1),
+            legend.position = "bottom")
+
+    p_spending <- ggplot() +
+      geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
+      geom_col(data = cat_monthly_all, aes(x = month, y = value, fill = category),
+               position = "stack", width = 25, alpha = 0.85) +
+      geom_step(data = ts, aes(x = month, y = expected_burn),
+                linetype = "dashed", linewidth = 0.7, color = "grey30") +
+      scale_fill_manual(values = CATEGORY_COLORS, drop = FALSE) +
+      scale_x_date(date_breaks = "1 month", date_labels = "%b",
+                   expand = expansion(mult = c(0.01, 0.02))) +
+      scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
+      labs(x = NULL, y = "CHF (Spending)", fill = "Category") +
+      theme_bw() +
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+            axis.text.x = element_text(size = 6, angle = 90, vjust = 0.5, hjust = 1),
+            legend.position = "bottom")
+
+    p_balance <- ggplot() +
+      geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
+      geom_line(data = ts, aes(x = month, y = balance), linewidth = 1.2) +
+      geom_hline(yintercept = 0, color = "firebrick", linewidth = 0.6) +
+      scale_x_date(date_breaks = "1 month", date_labels = "%b",
+                   expand = expansion(mult = c(0.01, 0.02))) +
+      scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
+      labs(x = "Month", y = "CHF (Balance)") +
+      theme_bw() +
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+            axis.text.x = element_text(size = 6, angle = 90, vjust = 0.5, hjust = 1),
+            legend.position = "bottom")
+
+    gridExtra::grid.arrange(p_income, p_spending, p_balance, ncol = 1, heights = c(1, 1, 1))
   })
 
   output$ui_psp_select_fc <- renderUI({
