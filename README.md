@@ -18,7 +18,7 @@ A Shiny app for monitoring and forecasting lab finances across PSP accounts.
    - `Zahlungsplan_new.xlsx` — one empty tab per PSP
    - `Salaryplan_new.xlsx` — empty template
    - `Investments_new.xlsx` — empty template
-5. Fill in details via the **📋 Konten** and **💳 Zahlungsplan** tabs, then save and reload
+5. Fill in details from within the App via the **📋 Konten** and **💳 Zahlungsplan** tabs, or by opening the Excel files, then save and reload
 
 ### Optional files (place in `data_raw/`)
 
