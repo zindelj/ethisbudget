@@ -132,7 +132,7 @@ read_zahlungsplan <- function(f, dummy_date = as_date("2025-08-01")) {
     mutate(id = id,
            planned_income = parse_number(as.character(betrag),
                                          locale = locale(decimal_mark = ".", grouping_mark = ",")),
-           date = suppressWarnings(as_date(date))) |>
+           date = as_date(date)) |>
     transmute(id, date, planned_income) |>
     filter(!is.na(date)) |>
     group_by(id, date) |>
@@ -385,49 +385,17 @@ load_all_data <- function(ep_path) {
       # try converting numeric-looking values to dates, leave text (e.g. "unendlich") as-is
       ifelse(
         !is.na(suppressWarnings(as.numeric(x))) & suppressWarnings(as.numeric(x)) > 10000,
-        suppressWarnings(as.character(as_date(as.numeric(x), origin = "1899-12-30"))),
+        as.character(as_date(as.numeric(x), origin = "1899-12-30")),
         x
       )
     })) |>
     as.data.frame()
 
-  # --- Investments ---
-  inv_path <- file.path(raw_dir, "Investments_new.xlsx")
-  if (!file.exists(inv_path)) {
-    writexl::write_xlsx(
-      list(Investments = data.frame(Date=character(), Amount=numeric(), Description=character(),
-                                    PSP=character(), Category=character(), stringsAsFactors=FALSE)),
-      inv_path)
-  }
-  investments <- tryCatch({
-    df <- read_excel(inv_path, col_types = "text")
-    if (nrow(df) == 0) return(tibble(month=as_date(character()), amount=numeric(),
-                                      desc=character(), psp=character(), cat=character()))
-    names(df) <- c("Date","Amount","Description","PSP","Category")
-    df |>
-      mutate(
-        # handle both Excel serial numbers and "YYYY-MM-DD" strings
-        Date = ifelse(!is.na(suppressWarnings(as.numeric(Date))) &
-                        suppressWarnings(as.numeric(Date)) > 10000,
-                      as.character(as_date(as.numeric(Date), origin = "1899-12-30")),
-                      Date),
-        month  = suppressWarnings(floor_date(as_date(Date), "month")),
-        amount = suppressWarnings(as.numeric(Amount)),
-        psp    = canonical_id(as.character(PSP)),
-        desc   = as.character(Description),
-        cat    = as.character(Category)
-      ) |>
-      filter(!is.na(month), !is.na(amount), amount > 0) |>
-      select(month, amount, desc, psp, cat)
-  }, error = function(e) tibble(month=as_date(character()), amount=numeric(),
-                                 desc=character(), psp=character(), cat=character()))
-
   list(konten = konten, konten_raw = konten_raw,
        zahlungsplan = zahlungsplan_combined,
        expected_burn = expected_burn_df, ist_monthly = ist_monthly,
        planned_income_m = planned_income_m, reference_date = reference_date,
-       ist_raw = ist_raw, lohntabelle = lohntabelle, salary_plan = salary_plan,
-       investments = investments)
+       ist_raw = ist_raw, lohntabelle = lohntabelle, salary_plan = salary_plan)
 }
 
 # ================================================================
@@ -689,18 +657,10 @@ make_forecast_plot <- function(d, burn_window_months = 6,
   salary_cost        <- compute_salary_cost(future_months_vec, d, burn_window_months, psp_id = NULL)
   nonsalary_burn     <- if (!is.null(d$salary_plan)) 0 else burn_ref
 
-  # investments: future one-off costs
-  inv <- if (!is.null(d$investments) && nrow(d$investments) > 0)
-    d$investments |> filter(month > today_month) |>
-      group_by(month) |> summarise(inv_cost = sum(amount, na.rm=TRUE), .groups="drop")
-  else tibble(month=as_date(character()), inv_cost=numeric())
-
   ts_future <- tibble(month = future_months_vec, salary_cost = salary_cost) |>
     left_join(future_income, by = "month") |>
-    left_join(inv, by = "month") |>
     mutate(total_income   = replace_na(total_income, 0),
-           inv_cost       = replace_na(inv_cost, 0),
-           total_spending = nonsalary_burn + salary_cost + inv_cost,
+           total_spending = nonsalary_burn + salary_cost,
            balance        = current_surplus + cumsum(total_income - total_spending))
 
   runout_row   <- ts_future |> filter(balance <= 0) |> slice_head(n = 1)
@@ -761,10 +721,6 @@ make_forecast_plot <- function(d, burn_window_months = 6,
                            label = end_label,
                            panel = factor("Balance", levels = c("Cashflow","Balance")))
 
-  inv_bars <- ts_future |> filter(inv_cost > 0) |>
-    transmute(month, value = inv_cost,
-              panel = factor("Cashflow", levels = c("Cashflow","Balance")))
-
   ggplot() +
     geom_ribbon(data = ribbon_pos, aes(x = month, ymin = ymin, ymax = ymax),
                 fill = "forestgreen", alpha = 0.25, inherit.aes = FALSE) +
@@ -774,12 +730,6 @@ make_forecast_plot <- function(d, burn_window_months = 6,
     geom_vline(xintercept = start_future, linetype = "dotted", linewidth = 0.8) +
     geom_col(data = bars_all, aes(x = month, y = value, fill = series),
              position = "dodge", width = 25, alpha = 0.85) +
-    geom_col(data = inv_bars, aes(x = month, y = value), fill = "#E15759",
-             width = 18, alpha = 0.9, inherit.aes = FALSE) +
-    geom_text(data = inv_bars, aes(x = month, y = value,
-              label = paste0(round(value/1000), "k")),
-              vjust = -0.4, size = 2.5, color = "#E15759",
-              fontface = "bold", inherit.aes = FALSE) +
     geom_line(data = bal_all, aes(x = month, y = value, linetype = series), linewidth = 1.2) +
     geom_hline(yintercept = 0, color = "firebrick", linewidth = 0.6) +
     geom_label(data = end_label_df, aes(x = month, y = value, label = label),
@@ -875,18 +825,10 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6) {
   salary_cost        <- compute_salary_cost(future_months_vec, d, burn_window_months, psp_id = psp_id)
   nonsalary_burn     <- if (!is.null(d$salary_plan)) 0 else burn_ref
 
-  # investments for this PSP
-  inv_psp <- if (!is.null(d$investments) && nrow(d$investments) > 0)
-    d$investments |> filter(psp == psp_id, month > today_month) |>
-      group_by(month) |> summarise(inv_cost = sum(amount, na.rm=TRUE), .groups="drop")
-  else tibble(month=as_date(character()), inv_cost=numeric())
-
   ts_future <- tibble(month = future_months_vec, salary_cost = salary_cost) |>
     left_join(future_income, by = "month") |>
-    left_join(inv_psp, by = "month") |>
     mutate(total_income   = replace_na(total_income, 0),
-           inv_cost       = replace_na(inv_cost, 0),
-           total_spending = nonsalary_burn + salary_cost + inv_cost,
+           total_spending = nonsalary_burn + salary_cost,
            balance        = current_surplus + cumsum(total_income - total_spending))
 
   runout_row    <- ts_future |> filter(balance <= 0) |> slice_head(n = 1)
@@ -952,10 +894,6 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6) {
                           label = end_label,
                           panel = factor("Balance", levels = c("Cashflow","Balance")))
 
-  inv_bars_psp <- inv_psp |> filter(inv_cost > 0) |>
-    transmute(month, value = inv_cost,
-              panel = factor("Cashflow", levels = c("Cashflow","Balance")))
-
   ggplot() +
     geom_ribbon(data = ribbon_pos, aes(x = month, ymin = ymin, ymax = ymax),
                 fill = "forestgreen", alpha = 0.25, inherit.aes = FALSE) +
@@ -965,12 +903,6 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6) {
     geom_vline(xintercept = start_future, linetype = "dotted", linewidth = 0.8) +
     geom_col(data = bars_all, aes(x = month, y = value, fill = series),
              position = "dodge", width = 25, alpha = 0.85) +
-    geom_col(data = inv_bars_psp, aes(x = month, y = value), fill = "#E15759",
-             width = 18, alpha = 0.9, inherit.aes = FALSE) +
-    geom_text(data = inv_bars_psp, aes(x = month, y = value,
-              label = paste0(round(value/1000), "k")),
-              vjust = -0.4, size = 2.5, color = "#E15759",
-              fontface = "bold", inherit.aes = FALSE) +
     geom_line(data = bal_all, aes(x = month, y = value, linetype = series), linewidth = 1.2) +
     geom_hline(yintercept = 0, color = "firebrick", linewidth = 0.6) +
     geom_label(data = end_label_df, aes(x = month, y = value, label = label),
@@ -1150,19 +1082,6 @@ ui <- page_navbar(
     )
   ),
 
-  nav_panel("💰 Investments",
-    layout_sidebar(
-      sidebar = sidebar(width = 220,
-        actionButton("btn_save_inv", "💾 Save Investments_new.xlsx", class = "btn-sm btn-success w-100"),
-        hr(),
-        helpText("Add planned one-off costs (equipment, sequencing, etc.).",
-                 "Right-click table to add/remove rows.",
-                 "Investments are deducted in forecasts and shown as red bars.")
-      ),
-      card(rhandsontable::rHandsontableOutput("hot_inv", height = "600px"))
-    )
-  ),
-
   nav_panel("📋 Konten",
     layout_sidebar(
       sidebar = sidebar(width = 220,
@@ -1186,10 +1105,7 @@ ui <- page_navbar(
         uiOutput("ui_consumables_info_psp"),
         hr(),
         strong("Personnel — toggle to include/exclude"),
-        uiOutput("ui_person_toggles_psp"),
-        hr(),
-        strong("Investments — toggle to include/exclude"),
-        uiOutput("ui_inv_toggles_psp")
+        uiOutput("ui_person_toggles_psp")
       ),
       card(plotOutput("plot_forecast_psp", height = "600px"))
     )
@@ -1204,10 +1120,7 @@ ui <- page_navbar(
         uiOutput("ui_consumables_info"),
         hr(),
         strong("Personnel — toggle to include/exclude"),
-        uiOutput("ui_person_toggles"),
-        hr(),
-        strong("Investments — toggle to include/exclude"),
-        uiOutput("ui_inv_toggles")
+        uiOutput("ui_person_toggles")
       ),
       card(plotOutput("plot_forecast", height = "600px"))
     )
@@ -1428,51 +1341,8 @@ Data up to: ",
   rv_sal     <- reactiveValues(plan = NULL)
   rv_zp      <- reactiveValues(sheets = NULL)  # named list: tab_name -> data.frame
   rv_konten  <- reactiveValues(raw = NULL)
-  rv_inv     <- reactiveValues(raw = NULL)
 
-  # load investments on data load
-  observeEvent(rv$data, {
-    inv_path <- here::here("data_raw", "Investments_new.xlsx")
-    rv_inv$raw <- if (file.exists(inv_path)) {
-      tryCatch(
-        as.data.frame(read_excel(inv_path, col_types = "text")),
-        error = function(e) data.frame(Date=character(), Amount=character(),
-                                        Description=character(), PSP=character(),
-                                        Category=character(), stringsAsFactors=FALSE)
-      )
-    } else {
-      data.frame(Date=character(), Amount=character(), Description=character(),
-                 PSP=character(), Category=character(), stringsAsFactors=FALSE)
-    }
-  }, priority = -1)  # after zp/konten loads
-
-  output$hot_inv <- rhandsontable::renderRHandsontable({
-    req(rv_inv$raw)
-    psp_choices <- if (!is.null(rv$data)) c("", sort(unique(rv$data$konten$id))) else character()
-    cat_choices <- c("", CATEGORY_ORDER)
-    rhandsontable::rhandsontable(rv_inv$raw, stretchH = "all", rowHeaders = FALSE) |>
-      rhandsontable::hot_col("PSP",      type = "dropdown", source = psp_choices) |>
-      rhandsontable::hot_col("Category", type = "dropdown", source = cat_choices)
-  })
-
-  observeEvent(input$btn_save_inv, {
-    hot <- input$hot_inv
-    if (!is.null(hot)) {
-      df <- rhandsontable::hot_to_r(hot)
-      df <- as.data.frame(lapply(df, as.character), stringsAsFactors = FALSE)
-      rv_inv$raw <- df
-    }
-    inv_path <- here::here("data_raw", "Investments_new.xlsx")
-    tryCatch({
-      writexl::write_xlsx(list(Investments = rv_inv$raw), inv_path)
-      showNotification("✅ Investments_new.xlsx saved — reloading data...", type = "message", duration = 3)
-      reload_data()
-    }, error = function(e) {
-      showNotification(paste("❌ Save failed:", e$message), type = "error", duration = 6)
-    })
-  })
-
-
+  # load zahlungsplan sheets into rv_zp on data load
   observeEvent(rv$data, {
     zp_path <- here::here("data_raw", "Zahlungsplan_new.xlsx")
     existing_sheets <- if (file.exists(zp_path)) {
@@ -2359,83 +2229,16 @@ Data up to: ",
     sp |> filter(name %in% inc)
   })
 
-  # ── Investment toggles ─────────────────────────────────────────────────────
-  make_inv_choices <- function(inv, psp_filter = NULL) {
-    if (is.null(inv) || nrow(inv) == 0) return(character())
-    if (!is.null(psp_filter)) inv <- inv |> filter(psp == psp_filter)
-    if (nrow(inv) == 0) return(character())
-    df <- inv |>
-      mutate(label = paste0(desc, " (", format(month, "%b %Y"), ", ",
-                             format(round(amount/1000, 1), big.mark="'"), "k CHF)"),
-             key   = paste0(psp, "_", format(month, "%Y%m"), "_", round(amount))) |>
-      distinct(key, label)
-    setNames(df$key, df$label)
-  }
-
-  output$ui_inv_toggles <- renderUI({
-    inv <- rv$data$investments
-    if (is.null(inv) || nrow(inv) == 0) return(helpText("No investments planned.", style="font-size:0.85em;"))
-    choices <- make_inv_choices(inv)
-    checkboxGroupInput("included_inv", NULL,
-      choiceNames  = names(choices), choiceValues = unname(choices),
-      selected     = unname(choices))
-  })
-
-  output$ui_inv_toggles_psp <- renderUI({
-    req(input$psp_id_fc)
-    inv <- rv$data$investments
-    if (is.null(inv) || nrow(inv) == 0) return(helpText("No investments for this PSP.", style="font-size:0.85em;"))
-    choices <- make_inv_choices(inv, psp_filter = input$psp_id_fc)
-    if (length(choices) == 0) return(helpText("No investments for this PSP.", style="font-size:0.85em;"))
-    checkboxGroupInput("included_inv_psp", NULL,
-      choiceNames  = names(choices), choiceValues = unname(choices),
-      selected     = unname(choices))
-  })
-
-  # re-select all when data reloads
-  observeEvent(rv$data, {
-    inv <- rv$data$investments
-    if (is.null(inv) || nrow(inv) == 0) return()
-    all_keys <- inv |>
-      mutate(key = paste0(psp, "_", format(month, "%Y%m"), "_", round(amount))) |>
-      pull(key)
-    updateCheckboxGroupInput(session, "included_inv",     selected = all_keys)
-    updateCheckboxGroupInput(session, "included_inv_psp", selected = all_keys)
-  })
-
-  # filter investments by selection
-  inv_filtered_tot <- reactive({
-    inv <- rv$data$investments
-    if (is.null(inv) || nrow(inv) == 0) return(inv)
-    sel <- input$included_inv
-    if (is.null(sel)) return(inv |> filter(FALSE))  # none checked = none shown
-    inv |> mutate(key = paste0(psp, "_", format(month, "%Y%m"), "_", round(amount))) |>
-      filter(key %in% sel) |> select(-key)
-  })
-
-  inv_filtered_psp <- reactive({
-    inv <- rv$data$investments
-    if (is.null(inv) || nrow(inv) == 0) return(inv)
-    sel <- input$included_inv_psp
-    if (is.null(sel)) return(inv |> filter(FALSE))
-    inv |> mutate(key = paste0(psp, "_", format(month, "%Y%m"), "_", round(amount))) |>
-      filter(key %in% sel) |> select(-key)
-  })
-
   output$plot_forecast_psp <- renderPlot({
     req(rv$data, input$psp_id_fc)
-    d_fc <- rv$data
-    d_fc$salary_plan  <- sal_plan_psp()
-    d_fc$investments  <- inv_filtered_psp()
+    d_fc <- rv$data; d_fc$salary_plan <- sal_plan_psp()
     p <- make_psp_forecast_plot(input$psp_id_fc, d_fc, input$burn_window_psp)
     if (is.null(p)) { plot.new(); text(0.5, 0.5, "No data available", cex = 1.5) } else p
   })
 
   output$plot_forecast <- renderPlot({
     req(rv$data)
-    d_fc <- rv$data
-    d_fc$salary_plan <- sal_plan_tot()
-    d_fc$investments <- inv_filtered_tot()
+    d_fc <- rv$data; d_fc$salary_plan <- sal_plan_tot()
     make_forecast_plot(d_fc, burn_window_months = input$burn_window)
   })
 }
