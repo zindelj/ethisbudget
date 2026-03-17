@@ -1112,12 +1112,18 @@ ui <- page_navbar(
         uiOutput("ui_psp_select"),
         helpText("Actual balance ends at last available data month.")
       ),
-      card(plotOutput("plot_monitoring", height = "900px"))
+      tagList(
+        uiOutput("header_monitoring_psp"),
+        card(plotOutput("plot_monitoring", height = "900px"))
+      )
     )
   ),
 
   nav_panel("📊 Monitoring (All PSPs)",
-    card(plotOutput("plot_monitoring_all", height = "900px"))
+    tagList(
+      uiOutput("header_monitoring_all"),
+      card(plotOutput("plot_monitoring_all", height = "900px"))
+    )
   ),
 
   nav_panel("👥 Salary Plan",
@@ -1284,6 +1290,147 @@ server <- function(input, output, session) {
       arrange(id)
     selectInput("psp_id", "Select PSP",
                 choices = setNames(psp_ids$id, psp_ids$label))
+  })
+
+  # ── helper: format CHF numbers ──────────────────────────────────────────
+  fmt_chf <- function(x) format(round(x), big.mark = "'", scientific = FALSE)
+
+  # ── Monitoring (per PSP) header ──────────────────────────────────────────
+  output$header_monitoring_psp <- renderUI({
+    req(rv$data, input$psp_id)
+    d            <- rv$data
+    psp_id       <- input$psp_id
+    today_month  <- d$reference_date
+    konten       <- d$konten
+    kostenstelle_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
+    startup_ids      <- konten |> filter(typ == "Startup")      |> pull(id)
+
+    cur_year     <- year(today_month)
+    is_kost      <- psp_id %in% kostenstelle_ids
+
+    # For Kostenstelle: scope all header stats to current calendar year only
+    yr_filter_planned <- if (is_kost) quote(year(month) == cur_year) else quote(TRUE)
+    yr_filter_ist     <- if (is_kost) quote(year(month) == cur_year) else quote(month <= today_month)
+
+    # Budget total = planned income (current year for Kostenstelle), else actual income fallback
+    budget_total <- d$planned_income_m |>
+      filter(id == psp_id, !!yr_filter_planned) |>
+      summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+    if (budget_total == 0) {
+      budget_total <- d$ist_monthly |>
+        filter(id == psp_id, !!yr_filter_ist) |>
+        summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
+    }
+
+    # IST = spending (current year for Kostenstelle, all to reference date otherwise)
+    ist_total <- d$ist_monthly |>
+      filter(id == psp_id, !!yr_filter_ist) |>
+      summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
+
+    pct_spent <- if (budget_total > 0) round(100 * ist_total / budget_total, 1) else NA_real_
+
+    # Balance = income - spending (scoped same as above)
+    if (is_kost) {
+      income_so_far <- d$planned_income_m |>
+        filter(id == psp_id, year(month) == cur_year) |>
+        summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+    } else if (psp_id %in% startup_ids) {
+      income_so_far <- d$planned_income_m |>
+        filter(id == psp_id, month <= today_month) |>
+        summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+    } else {
+      income_so_far <- d$ist_monthly |>
+        filter(id == psp_id, month <= today_month) |>
+        summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
+    }
+    balance <- income_so_far - ist_total
+
+    # FTE in current month for this PSP
+    fte_now <- NA_real_
+    if (!is.null(d$salary_plan) && nrow(d$salary_plan) > 0) {
+      fte_now <- d$salary_plan |>
+        filter(psp == psp_id, floor_date(as_date(month), "month") == floor_date(today_month, "month")) |>
+        summarise(v = sum(fte, na.rm = TRUE)) |> pull(v)
+      if (length(fte_now) == 0) fte_now <- NA_real_
+    }
+
+    tags$div(
+      style = "display:flex; gap:2rem; padding:0.5rem 1rem; background:#f8f9fa;
+               border-radius:6px; margin-bottom:0.5rem; flex-wrap:wrap; font-size:0.9rem;",
+      tags$span(tags$b("Data up to: "), format(today_month, "%Y-%m")),
+      tags$span(tags$b("Budget total: "), paste0(fmt_chf(budget_total), " CHF")),
+      tags$span(tags$b("IST: "),          paste0(fmt_chf(ist_total),    " CHF")),
+      tags$span(tags$b("Budget-IST: "),   if (!is.na(pct_spent)) paste0(fmt_chf(budget_total - ist_total), " CHF (", pct_spent, "% spent)") else "—"),
+      tags$span(tags$b("Balance: "),      paste0(fmt_chf(balance),      " CHF")),
+      tags$span(tags$b("FTE (this month): "), if (!is.na(fte_now) && fte_now > 0) round(fte_now, 2) else "—")
+    )
+  })
+
+  # ── Monitoring (All PSPs) header ─────────────────────────────────────────
+  output$header_monitoring_all <- renderUI({
+    req(rv$data)
+    d            <- rv$data
+    today_month  <- d$reference_date
+    konten       <- d$konten
+    kostenstelle_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
+    startup_ids      <- konten |> filter(typ == "Startup")      |> pull(id)
+    exclude_ids      <- konten |> filter(typ == "Erlöse")       |> pull(id)
+    exclude_all      <- c(startup_ids, exclude_ids)
+
+    cur_year <- year(today_month)
+
+    # Budget total: Kostenstelle = current year only; all others = full zahlungsplan
+    planned_ids <- d$planned_income_m |> filter(!id %in% exclude_all) |> pull(id) |> unique()
+    budget_total_kost <- d$planned_income_m |>
+      filter(id %in% kostenstelle_ids, year(month) == cur_year) |>
+      summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+    budget_total_other <- d$planned_income_m |>
+      filter(!id %in% exclude_all, !id %in% kostenstelle_ids) |>
+      summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+    budget_total_nozp <- d$ist_monthly |>
+      filter(!id %in% exclude_all, !id %in% planned_ids) |>
+      summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
+    budget_total <- budget_total_kost + budget_total_other + budget_total_nozp
+
+    # IST: Kostenstelle = current year only; others = up to reference date
+    ist_kost <- d$ist_monthly |>
+      filter(id %in% kostenstelle_ids, year(month) == cur_year) |>
+      summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
+    ist_other <- d$ist_monthly |>
+      filter(!id %in% c(kostenstelle_ids, exclude_all), month <= today_month) |>
+      summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
+    ist_total <- ist_kost + ist_other
+
+    pct_spent <- if (budget_total > 0) round(100 * ist_total / budget_total, 1) else NA_real_
+
+    # Balance: Kostenstelle current year; Startup planned; others actual income
+    income_kost <- d$planned_income_m |>
+      filter(id %in% kostenstelle_ids, year(month) == cur_year) |>
+      summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+    income_actual <- d$ist_monthly |>
+      filter(!id %in% c(kostenstelle_ids, exclude_all), month <= today_month) |>
+      summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
+    balance <- (income_kost + income_actual) - ist_total
+
+    # FTE in current month across all PSPs
+    fte_now <- NA_real_
+    if (!is.null(d$salary_plan) && nrow(d$salary_plan) > 0) {
+      fte_now <- d$salary_plan |>
+        filter(floor_date(as_date(month), "month") == floor_date(today_month, "month")) |>
+        summarise(v = sum(fte, na.rm = TRUE)) |> pull(v)
+      if (length(fte_now) == 0) fte_now <- NA_real_
+    }
+
+    tags$div(
+      style = "display:flex; gap:2rem; padding:0.5rem 1rem; background:#f8f9fa;
+               border-radius:6px; margin-bottom:0.5rem; flex-wrap:wrap; font-size:0.9rem;",
+      tags$span(tags$b("Data up to: "), format(today_month, "%Y-%m")),
+      tags$span(tags$b("Budget total: "), paste0(fmt_chf(budget_total), " CHF (excl. Startup)")),
+      tags$span(tags$b("IST: "),          paste0(fmt_chf(ist_total),    " CHF")),
+      tags$span(tags$b("Budget-IST: "),   if (!is.na(pct_spent)) paste0(fmt_chf(budget_total - ist_total), " CHF (", pct_spent, "% spent)") else "—"),
+      tags$span(tags$b("Balance: "),      paste0(fmt_chf(balance),      " CHF")),
+      tags$span(tags$b("FTE (this month): "), if (!is.na(fte_now) && fte_now > 0) round(fte_now, 2) else "—")
+    )
   })
 
   output$plot_monitoring <- renderPlot({
