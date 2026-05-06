@@ -398,28 +398,31 @@ load_all_data <- function(ep_path) {
                                     PSP=character(), Category=character(), stringsAsFactors=FALSE)),
       inv_path)
   }
+  empty_investments <- tibble(month=as_date(character()), amount=numeric(),
+                              desc=character(), psp=character(), cat=character())
   investments <- tryCatch({
     df <- read_excel(inv_path, col_types = "text")
-    if (nrow(df) == 0) return(tibble(month=as_date(character()), amount=numeric(),
-                                      desc=character(), psp=character(), cat=character()))
-    names(df) <- c("Date","Amount","Description","PSP","Category")
-    df |>
-      mutate(
-        # handle both Excel serial numbers and "YYYY-MM-DD" strings
-        Date = ifelse(!is.na(suppressWarnings(as.numeric(Date))) &
-                        suppressWarnings(as.numeric(Date)) > 10000,
-                      as.character(as_date(as.numeric(Date), origin = "1899-12-30")),
-                      Date),
-        month  = suppressWarnings(floor_date(as_date(Date), "month")),
-        amount = suppressWarnings(as.numeric(Amount)),
-        psp    = canonical_id(as.character(PSP)),
-        desc   = as.character(Description),
-        cat    = as.character(Category)
-      ) |>
-      filter(!is.na(month), !is.na(amount), amount > 0) |>
-      select(month, amount, desc, psp, cat)
-  }, error = function(e) tibble(month=as_date(character()), amount=numeric(),
-                                 desc=character(), psp=character(), cat=character()))
+    if (nrow(df) == 0) {
+      empty_investments
+    } else {
+      names(df) <- c("Date","Amount","Description","PSP","Category")
+      df |>
+        mutate(
+          # handle both Excel serial numbers and "YYYY-MM-DD" strings
+          Date = ifelse(!is.na(suppressWarnings(as.numeric(Date))) &
+                          suppressWarnings(as.numeric(Date)) > 10000,
+                        as.character(as_date(as.numeric(Date), origin = "1899-12-30")),
+                        Date),
+          month  = suppressWarnings(floor_date(as_date(Date), "month")),
+          amount = suppressWarnings(as.numeric(Amount)),
+          psp    = canonical_id(as.character(PSP)),
+          desc   = as.character(Description),
+          cat    = as.character(Category)
+        ) |>
+        filter(!is.na(month), !is.na(amount), amount > 0) |>
+        select(month, amount, desc, psp, cat)
+    }
+  }, error = function(e) empty_investments)
 
   list(konten = konten, konten_raw = konten_raw,
        zahlungsplan = zahlungsplan_combined,
