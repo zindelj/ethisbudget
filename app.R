@@ -209,7 +209,19 @@ CATEGORY_RULES <- tibble::tribble(
   "ETH-interne Anlässe",     NA,                           "Travel, Events & Training",
   "Repräsentationspesen",    NA,                           "Travel, Events & Training",
 
-  # Facility costs
+  # Facility costs — split by Buchungstext into FACS / EPIC / ScopeM,
+  # with the NA fallback catching anything unmatched.
+  "ILV TPF bud.r.Ko-Ver",    "^Staff Support FACS$",       "FACS",
+  "ILV TPF bud.r.Ko-Ver",    "^high-end analyzer$",        "FACS",
+  "ILV TPF bud.r.Ko-Ver",    "^Confocal$",                 "ScopeM",
+  "ILV TPF bud.r.Ko-Ver",    "^Staff$",                    "ScopeM",
+  "ILV TPF bud.r.Ko-Ver",    "^Sample Preparation Tool$",  "ScopeM",
+  "ILV TPF bud.r.Ko-Ver",    "^TypIIL mouse$",             "EPIC",
+  "ILV TPF bud.r.Ko-Ver",    "^Biopsie$",                  "EPIC",
+  "ILV TPF bud.r.Ko-Ver",    "^In Vitro Fertilisation$",   "EPIC",
+  "ILV TPF bud.r.Ko-Ver",    "^Embryotransfer$",           "EPIC",
+  "ILV TPF bud.r.Ko-Ver",    "^Staff Support 1: Import$",  "EPIC",
+  "ILV TPF bud.r.Ko-Ver",    "^Medikamente HPL$",          "EPIC",
   "ILV TPF bud.r.Ko-Ver",    NA,                           "Facility costs",
 
   # Internal charges
@@ -250,6 +262,9 @@ CATEGORY_COLORS <- c(
   "Equipment"                 = "#D28C3C",
   "IT, Office & Publications" = "#9664B4",
   "Travel, Events & Training" = "#C8645A",
+  "FACS"                      = "#B25068",
+  "EPIC"                      = "#E89B3C",
+  "ScopeM"                    = "#52B788",
   "Facility costs"            = "#5F9EA0",
   "Internal charges"          = "#828282",
   "Other"                     = "#B4AA96"
@@ -257,7 +272,8 @@ CATEGORY_COLORS <- c(
 
 CATEGORY_ORDER <- c("Salary","Consumables","Taconic","Animal purchase","Equipment",
                     "IT, Office & Publications","Travel, Events & Training",
-                    "Facility costs","Internal charges","Other")
+                    "FACS","EPIC","ScopeM","Facility costs",
+                    "Internal charges","Other")
 
 # ================================================================
 # Load all static data from dirname(ep_path)
