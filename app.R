@@ -147,84 +147,117 @@ safe_max_date <- function(x) { x <- x[!is.na(x)]; if (length(x) == 0) NA_Date_ e
 # ================================================================
 # Spending categories
 # ================================================================
-CATEGORY_MAP <- c(
+# Rules are matched on (kurztext, buchungstext). buchungstext is a regex:
+#   NA              → "match any buchungstext" (kurztext-only fallback)
+#   "^Foo$"         → exact match
+#   "^Foo"          → starts with "Foo"
+#   "Foo"           → contains "Foo" anywhere
+# Specific rules (non-NA buchungstext) override the NA fallback for the
+# same kurztext. Anything not matched falls through to "Other".
+CATEGORY_RULES <- tibble::tribble(
+  ~kurztext,                 ~buchungstext,                ~category,
+
   # Salary
-  "Lohnaufwand"             = "Salary",
-  "Personalkosten"          = "Salary",
-  "Pensionskasse"           = "Salary",
-  "SUVA"                    = "Salary",
-  "ALV"                     = "Salary",
-  "AHV"                     = "Salary",
-  "FAK-Beiträge"            = "Salary",
-  "Fam.zul."                = "Salary",
-  "Verwalt.aufw.PUBLICA"    = "Salary",
+  "Lohnaufwand",             NA,                           "Salary",
+  "Personalkosten",          NA,                           "Salary",
+  "Pensionskasse",           NA,                           "Salary",
+  "SUVA",                    NA,                           "Salary",
+  "ALV",                     NA,                           "Salary",
+  "AHV",                     NA,                           "Salary",
+  "FAK-Beiträge",            NA,                           "Salary",
+  "Fam.zul.",                NA,                           "Salary",
+  "Verwalt.aufw.PUBLICA",    NA,                           "Salary",
 
   # Consumables
-  "Laborwaren"              = "Consumables",
-  "Biol. Präp.& Chemika"    = "Consumables",
-  "Verbrauchsmaterial"      = "Consumables",
-  "Üb. Materialaufwand"     = "Consumables",
-  "EDV-Verbrauchsmat."      = "Consumables",
-  "IT-Verbrauchsmat."       = "Consumables",
-  "Halb-&Fertigpdt.Komp"    = "Consumables",
-  "Labortiere/Tierhaltg"    = "Consumables",
+  "Laborwaren",              NA,                           "Consumables",
+  "Biol. Präp.& Chemika",    NA,                           "Consumables",
+  "Verbrauchsmaterial",      NA,                           "Consumables",
+  "Üb. Materialaufwand",     NA,                           "Consumables",
+  "EDV-Verbrauchsmat.",      NA,                           "Consumables",
+  "IT-Verbrauchsmat.",       NA,                           "Consumables",
+  "Halb-&Fertigpdt.Komp",    NA,                           "Consumables",
+  "Labortiere/Tierhaltg",    "^Mouse Breeding Taconic$",   "Taconic",
+  "Labortiere/Tierhaltg",    "^Weiterbelastung",           "Animal purchase",
+  "Labortiere/Tierhaltg",    NA,                           "Consumables",
 
   # Equipment
-  "Maschinen, Geräte"       = "Equipment",
-  "Geräte, Maschinen"       = "Equipment",
-  "Hardware bis 10'000"     = "Equipment",
-  "Wäscheautomaten"         = "Equipment",
-  "Unterh, Rep Mobilien"    = "Equipment",
-  "Mobiliar & Einricht."    = "Equipment",
+  "Maschinen, Geräte",       NA,                           "Equipment",
+  "Geräte, Maschinen",       NA,                           "Equipment",
+  "Hardware bis 10'000",     NA,                           "Equipment",
+  "Wäscheautomaten",         NA,                           "Equipment",
+  "Unterh, Rep Mobilien",    NA,                           "Equipment",
+  "Mobiliar & Einricht.",    NA,                           "Equipment",
 
   # IT, Office & Publications
-  "Software"                = "IT, Office & Publications",
-  "Software (nicht akt)"    = "IT, Office & Publications",
-  "IT und Telekomm."        = "IT, Office & Publications",
-  "Monographien"            = "IT, Office & Publications",
-  "Drucksachen, Repro"      = "IT, Office & Publications",
-  "Büromaterial"            = "IT, Office & Publications",
+  "Software",                NA,                           "IT, Office & Publications",
+  "Software (nicht akt)",    NA,                           "IT, Office & Publications",
+  "IT und Telekomm.",        NA,                           "IT, Office & Publications",
+  "Monographien",            NA,                           "IT, Office & Publications",
+  "Drucksachen, Repro",      NA,                           "IT, Office & Publications",
+  "Büromaterial",            NA,                           "IT, Office & Publications",
 
   # Travel, Events & Training
-  "Flugreisen"              = "Travel, Events & Training",
-  "Bahn, ÖV-Mittel"         = "Travel, Events & Training",
-  "Unterkunft"              = "Travel, Events & Training",
-  "Reisekostenzurückerst."    = "Travel, Events & Training",
-  "Sachtransporte"          = "Travel, Events & Training",
-  "Kurier,Frachten"         = "Travel, Events & Training",
-  "Seminare u. Tagungen"    = "Travel, Events & Training",
-  "Aus- und Weiterbild."    = "Travel, Events & Training",
-  "Aus- & Weiterbildung"    = "Travel, Events & Training",
-  "ETH-interne Anlässe"     = "Travel, Events & Training",
-  "Repräsentationspesen"    = "Travel, Events & Training",
+  "Flugreisen",              NA,                           "Travel, Events & Training",
+  "Bahn, ÖV-Mittel",         NA,                           "Travel, Events & Training",
+  "Unterkunft",              NA,                           "Travel, Events & Training",
+  "Reisekostenzurückerst.",  NA,                           "Travel, Events & Training",
+  "Sachtransporte",          NA,                           "Travel, Events & Training",
+  "Kurier,Frachten",         NA,                           "Travel, Events & Training",
+  "Seminare u. Tagungen",    NA,                           "Travel, Events & Training",
+  "Aus- und Weiterbild.",    NA,                           "Travel, Events & Training",
+  "Aus- & Weiterbildung",    NA,                           "Travel, Events & Training",
+  "ETH-interne Anlässe",     NA,                           "Travel, Events & Training",
+  "Repräsentationspesen",    NA,                           "Travel, Events & Training",
+
+  # Facility costs
+  "ILV TPF bud.r.Ko-Ver",    NA,                           "Facility costs",
 
   # Internal charges
-  "ILV TPF bud.r.Ko-Ver"    = "Internal charges",
-  "Übr. DL ETH-nah.Einh"    = "Internal charges",
-  "Kostenübernahme"         = "Internal charges",
-  "Gebühren"                = "Internal charges",
-  "Wirtschaftsor. Fors."    = "Internal charges",
-  "Schenkungen"             = "Internal charges",
-  "Personalrekrutierung"    = "Internal charges",
+  "Übr. DL ETH-nah.Einh",    NA,                           "Internal charges",
+  "Kostenübernahme",         NA,                           "Internal charges",
+  "Gebühren",                NA,                           "Internal charges",
+  "Wirtschaftsor. Fors.",    NA,                           "Internal charges",
+  "Schenkungen",             NA,                           "Internal charges",
+  "Personalrekrutierung",    NA,                           "Internal charges",
 
   # Other
-  "Reserve Jahresabr"       = "Other",
-  "mehrere"                 = "Other"
+  "Reserve Jahresabr",       NA,                           "Other",
+  "mehrere",                 NA,                           "Other"
 )
+
+classify_category <- function(kurztext_vec, buchungstext_vec, rules = CATEGORY_RULES) {
+  out  <- rep("Other", length(kurztext_vec))
+  buch <- ifelse(is.na(buchungstext_vec), "", buchungstext_vec)
+  general  <- rules[is.na(rules$buchungstext), , drop = FALSE]
+  specific <- rules[!is.na(rules$buchungstext), , drop = FALSE]
+  for (i in seq_len(nrow(general))) {
+    out[!is.na(kurztext_vec) & kurztext_vec == general$kurztext[i]] <- general$category[i]
+  }
+  for (i in seq_len(nrow(specific))) {
+    mask <- !is.na(kurztext_vec) &
+            kurztext_vec == specific$kurztext[i] &
+            str_detect(buch, specific$buchungstext[i])
+    out[mask] <- specific$category[i]
+  }
+  out
+}
 
 CATEGORY_COLORS <- c(
   "Salary"                    = "#4682B4",
   "Consumables"               = "#52A868",
+  "Taconic"                   = "#A0522D",
+  "Animal purchase"           = "#CD853F",
   "Equipment"                 = "#D28C3C",
   "IT, Office & Publications" = "#9664B4",
   "Travel, Events & Training" = "#C8645A",
+  "Facility costs"            = "#5F9EA0",
   "Internal charges"          = "#828282",
   "Other"                     = "#B4AA96"
 )
 
-CATEGORY_ORDER <- c("Salary","Consumables","Equipment",
+CATEGORY_ORDER <- c("Salary","Consumables","Taconic","Animal purchase","Equipment",
                     "IT, Office & Publications","Travel, Events & Training",
-                    "Internal charges","Other")
+                    "Facility costs","Internal charges","Other")
 
 # ================================================================
 # Load all static data from dirname(ep_path)
@@ -236,7 +269,9 @@ load_all_data <- function(ep_path) {
   # --- Einzelposten (read first so we can bootstrap other files from it) ---
   ist_raw <- read_excel(ep_path) |>
     clean_names() |>
-    rename_with(~ str_replace_all(., "\\.", "_")) |>
+    rename_with(~ str_replace_all(., "\\.", "_"))
+  if (!"buchungstext" %in% names(ist_raw)) ist_raw$buchungstext <- NA_character_
+  ist_raw <- ist_raw |>
     mutate(
       buch_dat     = as_date(buch_dat),
       betrag_in_bw = as.numeric(betrag_in_bw),
@@ -244,7 +279,7 @@ load_all_data <- function(ep_path) {
       month        = floor_date(buch_dat, "month"),
       actual_income   = if_else(betrag_in_bw < 0, -betrag_in_bw, 0),
       actual_spending = if_else(betrag_in_bw > 0,  betrag_in_bw, 0),
-      category        = coalesce(CATEGORY_MAP[kurztext], "Other")
+      category        = classify_category(kurztext, buchungstext)
     )
 
   ep_ids <- sort(unique(ist_raw$id[!is.na(ist_raw$id)]))
