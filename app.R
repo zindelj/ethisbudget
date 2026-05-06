@@ -254,20 +254,25 @@ classify_category <- function(kurztext_vec, buchungstext_vec, rules = CATEGORY_R
   out
 }
 
+# Palette borrowed from ggsci scientific-journal sets (JCO / NPG) plus a
+# couple from D3 category10. Hand-picked to keep the three "facility" cool
+# tones distinct (Consumables teal vs ScopeM cyan vs Facility costs cadet)
+# and the three warm tones distinct (Animal purchase tan vs Equipment
+# orange vs EPIC gold).
 CATEGORY_COLORS <- c(
-  "Salary"                    = "#4682B4",
-  "Consumables"               = "#52A868",
-  "Taconic"                   = "#A0522D",
-  "Animal purchase"           = "#CD853F",
-  "Equipment"                 = "#D28C3C",
-  "IT, Office & Publications" = "#9664B4",
-  "Travel, Events & Training" = "#C8645A",
-  "FACS"                      = "#B25068",
-  "EPIC"                      = "#E89B3C",
-  "ScopeM"                    = "#52B788",
-  "Facility costs"            = "#5F9EA0",
-  "Internal charges"          = "#828282",
-  "Other"                     = "#B4AA96"
+  "Salary"                    = "#0073C2",  # JCO blue
+  "Consumables"               = "#00A087",  # NPG teal-green
+  "Taconic"                   = "#7E6148",  # NPG saddle brown
+  "Animal purchase"           = "#B09C85",  # NPG tan (paired with Taconic)
+  "Equipment"                 = "#FF7F0E",  # D3 orange
+  "IT, Office & Publications" = "#9467BD",  # D3 purple
+  "Travel, Events & Training" = "#E64B35",  # NPG red
+  "FACS"                      = "#F39B7F",  # NPG peach
+  "EPIC"                      = "#EFC000",  # JCO gold
+  "ScopeM"                    = "#4DBBD5",  # NPG cyan
+  "Facility costs"            = "#5F9EA0",  # cadet blue (residual)
+  "Internal charges"          = "#828282",  # gray
+  "Other"                     = "#B4AA96"   # tan
 )
 
 CATEGORY_ORDER <- c("Salary","Consumables","Taconic","Animal purchase","Equipment",
