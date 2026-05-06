@@ -210,7 +210,9 @@ CATEGORY_RULES <- tibble::tribble(
   "Repräsentationspesen",    NA,                           "Travel, Events & Training",
 
   # Facility costs — split by Buchungstext into FACS / EPIC / ScopeM,
-  # with the NA fallback catching anything unmatched.
+  # with the NA fallback catching anything unmatched. "Staff Support ASS"
+  # is a salary carve-out (booked under ILV TPF but is personnel cost).
+  "ILV TPF bud.r.Ko-Ver",    "^Staff Support ASS$",        "Salary",
   "ILV TPF bud.r.Ko-Ver",    "^Staff Support FACS$",       "FACS",
   "ILV TPF bud.r.Ko-Ver",    "^high-end analyzer$",        "FACS",
   "ILV TPF bud.r.Ko-Ver",    "^Confocal$",                 "ScopeM",
