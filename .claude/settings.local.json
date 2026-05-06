@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(command -v Rscript)",
+      "Bash(Rscript -e 'parse\\(\"/mnt/c/Users/zindelj/Documents/TizzuLab/ethisbudget/app.R\"\\); cat\\(\"PARSE OK\\\\n\"\\)')",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
+    ]
+  }
+}
