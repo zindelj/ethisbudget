@@ -1,6 +1,6 @@
 # ================================================================
 # app.R — minimal Shiny wrapper around existing scripts
-# Reads from data_raw/ at project root
+# Reads from a user-selected data folder (picked via shinyDirButton)
 # Only user input: select Einzelpostenbericht file
 # ================================================================
 
@@ -20,6 +20,7 @@ library(plotly)
 library(gridExtra)
 library(writexl)
 library(rhandsontable)
+library(shinyFiles)
 
 
 load_salaryplan <- function(path) {
@@ -226,11 +227,11 @@ CATEGORY_ORDER <- c("Salary","Consumables","Equipment",
                     "Internal charges","Other")
 
 # ================================================================
-# Load all static data from data_raw/
+# Load all static data from dirname(ep_path)
 # ================================================================
 load_all_data <- function(ep_path) {
 
-  raw_dir <- here("data_raw")
+  raw_dir <- dirname(ep_path)
 
   # --- Einzelposten (read first so we can bootstrap other files from it) ---
   ist_raw <- read_excel(ep_path) |>
@@ -294,21 +295,21 @@ load_all_data <- function(ep_path) {
   }
 
   # --- Zahlungsplan ---
-  zp_new_path <- file.path(raw_dir, "Zahlungsplan_new.xlsx")
+  zp_path <- file.path(raw_dir, "Zahlungsplan.xlsx")
 
-  if (!file.exists(zp_new_path)) {
-    message("Zahlungsplan_new.xlsx not found — creating empty file.")
+  if (!file.exists(zp_path)) {
+    message("Zahlungsplan.xlsx not found — creating empty file.")
     empty_df  <- data.frame(Fallig = character(), Betrag = character(),
                              Bezeichnung = character(), stringsAsFactors = FALSE)
     grant_ids <- konten |> filter(!tolower(typ) %in% c("kostenstelle","reserve","erlöse","startup")) |> pull(id)
     if (length(grant_ids) == 0) grant_ids <- ep_ids
     zp_bootstrap <- setNames(lapply(grant_ids, function(x) empty_df), grant_ids)
-    writexl::write_xlsx(zp_bootstrap, zp_new_path)
+    writexl::write_xlsx(zp_bootstrap, zp_path)
   }
 
-  zp_sheets <- excel_sheets(zp_new_path)
+  zp_sheets <- excel_sheets(zp_path)
   zp_files_list <- lapply(zp_sheets, function(sh) {
-    df  <- read_excel(zp_new_path, sheet = sh)
+    df  <- read_excel(zp_path, sheet = sh)
     tmp <- tempfile(pattern = paste0("Zahlungsplan_PSP_", sh, "_"), fileext = ".xlsx")
     writexl::write_xlsx(df, tmp)
     tmp
@@ -318,16 +319,14 @@ load_all_data <- function(ep_path) {
     summarise(planned_income = sum(planned_income, na.rm = TRUE), .groups = "drop")
 
   # --- Salary plan ---
-  sal_path <- file.path(raw_dir, "Salaryplan_new.xlsx")
-  if (!file.exists(sal_path)) sal_path <- file.path(raw_dir, "Salaryplan.xlsx")
+  sal_path <- file.path(raw_dir, "Salaryplan.xlsx")
   if (!file.exists(sal_path)) {
-    message("Salaryplan not found — creating empty file.")
+    message("Salaryplan.xlsx not found — creating empty file.")
     writexl::write_xlsx(
       list(Template = data.frame(Month=character(), CHF=numeric(), PSP=character(),
                                   Role=character(), FTE=numeric(), stringsAsFactors=FALSE)),
-      file.path(raw_dir, "Salaryplan_new.xlsx")
+      sal_path
     )
-    sal_path <- file.path(raw_dir, "Salaryplan_new.xlsx")
   }
 
   zahlungsplan_combined <- zahlungsplan |>
@@ -392,7 +391,7 @@ load_all_data <- function(ep_path) {
     as.data.frame()
 
   # --- Investments ---
-  inv_path <- file.path(raw_dir, "Investments_new.xlsx")
+  inv_path <- file.path(raw_dir, "Investments.xlsx")
   if (!file.exists(inv_path)) {
     writexl::write_xlsx(
       list(Investments = data.frame(Date=character(), Amount=numeric(), Description=character(),
@@ -427,7 +426,7 @@ load_all_data <- function(ep_path) {
        expected_burn = expected_burn_df, ist_monthly = ist_monthly,
        planned_income_m = planned_income_m, reference_date = reference_date,
        ist_raw = ist_raw, lohntabelle = lohntabelle, salary_plan = salary_plan,
-       investments = investments)
+       investments = investments, raw_dir = raw_dir)
 }
 
 # ================================================================
@@ -1106,10 +1105,12 @@ ui <- page_navbar(
 
   nav_panel("📁 Load Data",
     card(
-      card_header("Select Einzelpostenbericht"),
-      helpText("All other files (Konten.xlsx, Zahlungspläne) are read automatically from data_raw/."),
-      fileInput("file_ep", "Einzelpostenbericht.xlsx", accept = ".xlsx"),
-      actionButton("btn_load", "Load", class = "btn-primary"),
+      card_header("Select data folder"),
+      helpText("Pick the folder that contains the Einzelpostenbericht (export_YYYYMMDD_HHMMSS.xlsx). ",
+               "All other files (Konten, Zahlungsplan, Salaryplan, Investments, Lohntabelle) are read from — and written to — the same folder."),
+      shinyDirButton("data_dir_btn", "Browse folder…", "Select data folder", class = "btn-outline-primary"),
+      uiOutput("ui_data_dir_status"),
+      actionButton("btn_load", "Load", class = "btn-primary mt-2"),
       uiOutput("ui_load_status")
     )
   ),
@@ -1155,7 +1156,7 @@ ui <- page_navbar(
     layout_sidebar(
       sidebar = sidebar(width = 260,
         actionButton("btn_add_zp", "➕ Add Zahlungsplan", class = "btn-sm btn-outline-primary w-100 mb-2"),
-        actionButton("btn_save_zp", "💾 Save Zahlungsplan_new.xlsx", class = "btn-sm btn-success w-100"),
+        actionButton("btn_save_zp", "💾 Save Zahlungsplan.xlsx", class = "btn-sm btn-success w-100"),
         hr(),
         strong("PSPs — click to view/edit"),
         uiOutput("ui_zp_psp_list")
@@ -1167,7 +1168,7 @@ ui <- page_navbar(
   nav_panel("💰 Investments",
     layout_sidebar(
       sidebar = sidebar(width = 220,
-        actionButton("btn_save_inv", "💾 Save Investments_new.xlsx", class = "btn-sm btn-success w-100"),
+        actionButton("btn_save_inv", "💾 Save Investments.xlsx", class = "btn-sm btn-success w-100"),
         hr(),
         helpText("Add planned one-off costs (equipment, sequencing, etc.).",
                  "Right-click table to add/remove rows.",
@@ -1184,7 +1185,7 @@ ui <- page_navbar(
         actionButton("btn_save_konten", "💾 Save Konten.xlsx", class = "btn-sm btn-success w-100 mb-1"),
         actionButton("btn_revert_konten", "↩ Revert from disk", class = "btn-sm btn-outline-secondary w-100"),
         hr(),
-        helpText("Edit PSP accounts directly. Changes are saved to data_raw/Konten.xlsx."),
+        helpText("Edit PSP accounts directly. Changes are saved to Konten.xlsx in the selected data folder."),
         uiOutput("ui_konten_missing")
       ),
       card(rhandsontable::rHandsontableOutput("hot_konten", height = "600px"))
@@ -1237,7 +1238,54 @@ ui <- page_navbar(
 # ================================================================
 server <- function(input, output, session) {
 
-  rv <- reactiveValues(data = NULL, ep_path = NULL)
+  rv <- reactiveValues(data = NULL, ep_path = NULL, data_dir = NULL)
+
+  # --- Folder picker -------------------------------------------------------
+  # Roots: home + all volumes (Windows drive letters, Unix /). Session-scoped.
+  shinyFiles::shinyDirChoose(
+    input, "data_dir_btn",
+    roots   = c(Home = path.expand("~"), shinyFiles::getVolumes()()),
+    session = session
+  )
+
+  # Resolve picked directory → path; scan for latest export_YYYYMMDD_HHMMSS.xlsx
+  picked_data_dir <- reactive({
+    req(input$data_dir_btn)
+    sel <- input$data_dir_btn
+    if (is.null(sel) || identical(sel, 0L) || !is.list(sel) || is.null(sel$path)) return(NULL)
+    shinyFiles::parseDirPath(
+      roots = c(Home = path.expand("~"), shinyFiles::getVolumes()()),
+      sel
+    )
+  })
+
+  picked_ep_file <- reactive({
+    dir <- picked_data_dir()
+    req(dir, dir.exists(dir))
+    files <- list.files(dir, pattern = "^export_\\d{8}_\\d{6}\\.xlsx$", full.names = FALSE)
+    if (length(files) == 0) return(NULL)
+    files[order(files, decreasing = TRUE)][1]   # filename timestamp sorts as ISO-ish
+  })
+
+  observe({
+    rv$data_dir <- picked_data_dir()
+  })
+
+  output$ui_data_dir_status <- renderUI({
+    dir <- picked_data_dir()
+    if (is.null(dir)) {
+      return(helpText("(no folder selected)"))
+    }
+    ep <- picked_ep_file()
+    if (is.null(ep)) {
+      return(div(class = "alert alert-warning mt-2",
+                 p(strong("No Einzelpostenbericht found in:"), br(), tags$code(dir)),
+                 p("Expected a file matching ", tags$code("export_YYYYMMDD_HHMMSS.xlsx"), ".")))
+    }
+    div(class = "alert alert-info mt-2",
+        p(strong("Folder: "), tags$code(dir)),
+        p(strong("Will load: "), tags$code(ep)))
+  })
 
   reload_data <- function() {
     req(rv$ep_path)
@@ -1251,8 +1299,15 @@ server <- function(input, output, session) {
   }
 
   observeEvent(input$btn_load, {
-    req(input$file_ep)
-    rv$ep_path <- input$file_ep$datapath
+    dir <- picked_data_dir()
+    if (is.null(dir)) {
+      showNotification("Pick a data folder first.", type = "warning"); return()
+    }
+    ep <- picked_ep_file()
+    if (is.null(ep)) {
+      showNotification("No export_YYYYMMDD_HHMMSS.xlsx in that folder.", type = "error"); return()
+    }
+    rv$ep_path <- file.path(dir, ep)
     withProgress(message = "Loading data...", {
       tryCatch({
         rv$data <- load_all_data(rv$ep_path)
@@ -1271,26 +1326,14 @@ server <- function(input, output, session) {
     d <- rv$data
     n_psps <- nrow(d$konten)
     n_zp   <- length(unique(d$planned_income_m$id))
-    raw_dir <- here::here("data_raw")
-    bootstrapped <- c(
-      if (!file.exists(file.path(raw_dir, "Konten.xlsx"))) "Konten.xlsx" else NULL,
-      if (!file.exists(file.path(raw_dir, "Zahlungsplan_new.xlsx"))) "Zahlungsplan_new.xlsx" else NULL,
-      if (!file.exists(file.path(raw_dir, "Salaryplan_new.xlsx")) &&
-          !file.exists(file.path(raw_dir, "Salaryplan.xlsx"))) "Salaryplan_new.xlsx" else NULL
-    )
     tagList(
       div(class = "alert alert-success mt-2",
           p(strong("Loaded successfully")),
           p(n_psps, "accounts from Konten.xlsx"),
           p(n_zp,   "Zahlungspläne found"),
-          p("Reference date:", format(d$reference_date, "%d.%m.%Y"))
-      ),
-      if (length(bootstrapped) > 0)
-        div(class = "alert alert-warning mt-2",
-            strong("⚠️ These files were missing and have been created from EP data:"),
-            tags$ul(lapply(bootstrapped, tags$li)),
-            p(style="font-size:0.85em;", "Please fill in the details via the Konten and Zahlungsplan tabs.")
-        )
+          p("Reference date:", format(d$reference_date, "%d.%m.%Y")),
+          p("Data folder: ", tags$code(d$raw_dir))
+      )
     )
   })
 
@@ -1591,7 +1634,7 @@ Data up to: ",
 
   # load investments on data load
   observeEvent(rv$data, {
-    inv_path <- here::here("data_raw", "Investments_new.xlsx")
+    inv_path <- file.path(rv$data$raw_dir, "Investments.xlsx")
     rv_inv$raw <- if (file.exists(inv_path)) {
       tryCatch(
         as.data.frame(read_excel(inv_path, col_types = "text")),
@@ -1621,10 +1664,10 @@ Data up to: ",
       df <- as.data.frame(lapply(df, as.character), stringsAsFactors = FALSE)
       rv_inv$raw <- df
     }
-    inv_path <- here::here("data_raw", "Investments_new.xlsx")
+    inv_path <- file.path(rv$data$raw_dir, "Investments.xlsx")
     tryCatch({
       writexl::write_xlsx(list(Investments = rv_inv$raw), inv_path)
-      showNotification("✅ Investments_new.xlsx saved — reloading data...", type = "message", duration = 3)
+      showNotification("✅ Investments.xlsx saved — reloading data...", type = "message", duration = 3)
       reload_data()
     }, error = function(e) {
       showNotification(paste("❌ Save failed:", e$message), type = "error", duration = 6)
@@ -1633,7 +1676,7 @@ Data up to: ",
 
 
   observeEvent(rv$data, {
-    zp_path <- here::here("data_raw", "Zahlungsplan_new.xlsx")
+    zp_path <- file.path(rv$data$raw_dir, "Zahlungsplan.xlsx")
     existing_sheets <- if (file.exists(zp_path)) {
       sh_names <- excel_sheets(zp_path)
       setNames(
@@ -1662,7 +1705,7 @@ Data up to: ",
       tryCatch({
         writexl::write_xlsx(all_sheets, zp_path)
         showNotification(
-          paste0("ℹ️ Added ", length(missing_ids), " missing PSP tab(s) to Zahlungsplan_new.xlsx: ",
+          paste0("ℹ️ Added ", length(missing_ids), " missing PSP tab(s) to Zahlungsplan.xlsx: ",
                  paste(missing_ids, collapse = ", ")),
           type = "message", duration = 6)
       }, error = function(e) NULL)
@@ -1761,7 +1804,7 @@ Data up to: ",
       }
       rv_konten$raw <- df
     }
-    konten_path <- here::here("data_raw", "Konten.xlsx")
+    konten_path <- file.path(rv$data$raw_dir, "Konten.xlsx")
     # also sync any new konten ids to ZP
     tryCatch({
       writexl::write_xlsx(list(Konten = rv_konten$raw), konten_path)
@@ -1783,7 +1826,7 @@ Data up to: ",
             rv_zp$sheets[[mid]] <- data.frame(Fallig = character(), Betrag = character(),
                                               Bezeichnung = character(), stringsAsFactors = FALSE)
           }
-          zp_path <- here::here("data_raw", "Zahlungsplan_new.xlsx")
+          zp_path <- file.path(rv$data$raw_dir, "Zahlungsplan.xlsx")
           writexl::write_xlsx(rv_zp$sheets, zp_path)
           showNotification(paste0("ℹ️ Added ZP tabs for: ", paste(new_missing, collapse=", ")),
                            type = "message", duration = 5)
@@ -1797,7 +1840,7 @@ Data up to: ",
   })
 
   observeEvent(input$btn_revert_konten, {
-    konten_path <- here::here("data_raw", "Konten.xlsx")
+    konten_path <- file.path(rv$data$raw_dir, "Konten.xlsx")
     if (!file.exists(konten_path)) {
       showNotification("❌ Konten.xlsx not found on disk.", type = "error"); return()
     }
@@ -1895,10 +1938,10 @@ Data up to: ",
             df <- as.data.frame(lapply(df, function(x) tryCatch(x, error = function(e) as.character(x))), stringsAsFactors = FALSE)
             rv_zp$sheets[[nm_]] <- df
           }
-          zp_path <- here::here("data_raw", "Zahlungsplan_new.xlsx")
+          zp_path <- file.path(rv$data$raw_dir, "Zahlungsplan.xlsx")
           tryCatch({
             writexl::write_xlsx(rv_zp$sheets, zp_path)
-            showNotification(paste0("✅ Saved tab '", nm_, "' to Zahlungsplan_new.xlsx"),
+            showNotification(paste0("✅ Saved tab '", nm_, "' to Zahlungsplan.xlsx"),
                              type = "message", duration = 3)
             removeModal()
             reload_data()
@@ -1959,10 +2002,10 @@ Data up to: ",
   # save all button
   observeEvent(input$btn_save_zp, {
     req(rv_zp$sheets)
-    zp_path <- here::here("data_raw", "Zahlungsplan_new.xlsx")
+    zp_path <- file.path(rv$data$raw_dir, "Zahlungsplan.xlsx")
     tryCatch({
       writexl::write_xlsx(rv_zp$sheets, zp_path)
-      showNotification("✅ Zahlungsplan_new.xlsx saved — reloading data...", type = "message", duration = 3)
+      showNotification("✅ Zahlungsplan.xlsx saved — reloading data...", type = "message", duration = 3)
       reload_data()
     }, error = function(e) {
       showNotification(paste("❌ Save failed:", e$message), type = "error", duration = 6)
@@ -2383,10 +2426,10 @@ Data up to: ",
         transmute(Month = format(as_date(month), "%Y-%m-%d"), CHF = amount, PSP = psp, Role = role, FTE = fte)
     })
     names(sheets) <- people
-    sal_path <- here::here("data_raw", "Salaryplan_new.xlsx")
+    sal_path <- file.path(rv$data$raw_dir, "Salaryplan.xlsx")
     tryCatch({
       writexl::write_xlsx(sheets, sal_path)
-      showNotification("✅ Salaryplan_new.xlsx saved.", type = "message", duration = 3)
+      showNotification("✅ Salaryplan.xlsx saved.", type = "message", duration = 3)
     }, error = function(e) {
       showNotification(paste("❌ Save failed:", e$message), type = "error", duration = 6)
     })
