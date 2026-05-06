@@ -48,3 +48,13 @@ install.packages(c("shiny", "bslib", "readxl", "writexl", "janitor",
                    "ggplot2", "plotly", "gridExtra", "scales", "here",
                    "rhandsontable"))
 ```
+
+## Using Claude Code
+
+A `.claudeignore` file is included that prevents Claude Code from reading the `data_raw/` folder. **Keep all sensitive budget data (EP exports, salary files, payment schedules) exclusively in `data_raw/`** — this folder is excluded from Claude Code's context and is also listed in `.gitignore`.
+
+```
+data_raw/        ← sensitive data lives here, never inspected by Claude Code
+app.R            ← safe to share with Claude Code
+README.md        ← safe to share with Claude Code
+```

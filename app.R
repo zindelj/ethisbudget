@@ -619,7 +619,8 @@ interpolate_balance <- function(df, by = "week") {
 # Forecast / runout plot (from 04_, minimal changes)
 # ================================================================
 make_forecast_plot <- function(d, burn_window_months = 6,
-                                exclude_ids = character()) {
+                                exclude_ids = character(),
+                                inflation_rate = 0) {
   konten          <- d$konten
   ist_monthly     <- d$ist_monthly
   planned_income_m<- d$planned_income_m
@@ -700,8 +701,11 @@ make_forecast_plot <- function(d, burn_window_months = 6,
     left_join(inv, by = "month") |>
     mutate(total_income   = replace_na(total_income, 0),
            inv_cost       = replace_na(inv_cost, 0),
-           total_spending = nonsalary_burn + salary_cost + inv_cost,
-           balance        = current_surplus + cumsum(total_income - total_spending))
+           months_ahead   = as.numeric(interval(start_future, month) / months(1)),
+           infl_mult      = (1 + inflation_rate / 100) ^ (months_ahead / 12),
+           total_spending = (nonsalary_burn + salary_cost) * infl_mult + inv_cost,
+           balance        = current_surplus + cumsum(total_income - total_spending)) |>
+    select(-months_ahead, -infl_mult)
 
   runout_row   <- ts_future |> filter(balance <= 0) |> slice_head(n = 1)
   runout_month <- if (nrow(runout_row) == 0) NA_Date_ else runout_row$month
@@ -808,7 +812,7 @@ make_forecast_plot <- function(d, burn_window_months = 6,
 # ================================================================
 # Per-PSP forecast plot
 # ================================================================
-make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6) {
+make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_rate = 0) {
   konten          <- d$konten
   ist_monthly     <- d$ist_monthly
   planned_income_m<- d$planned_income_m
@@ -886,8 +890,11 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6) {
     left_join(inv_psp, by = "month") |>
     mutate(total_income   = replace_na(total_income, 0),
            inv_cost       = replace_na(inv_cost, 0),
-           total_spending = nonsalary_burn + salary_cost + inv_cost,
-           balance        = current_surplus + cumsum(total_income - total_spending))
+           months_ahead   = as.numeric(interval(start_future, month) / months(1)),
+           infl_mult      = (1 + inflation_rate / 100) ^ (months_ahead / 12),
+           total_spending = (nonsalary_burn + salary_cost) * infl_mult + inv_cost,
+           balance        = current_surplus + cumsum(total_income - total_spending)) |>
+    select(-months_ahead, -infl_mult)
 
   runout_row    <- ts_future |> filter(balance <= 0) |> slice_head(n = 1)
   runout_month  <- if (nrow(runout_row) == 0) NA_Date_ else runout_row$month
@@ -926,6 +933,7 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6) {
     "Data up to: ", format(today_month, "%Y-%m"),
     " | Avg spend (last ", burn_window_months, "m): ",
     format(round(burn_ref), big.mark = "'"), " CHF",
+    if (inflation_rate > 0) paste0(" | Inflation: ", inflation_rate, "%/yr") else "",
     " | Surplus: ", format(round(current_surplus), big.mark = "'"), " CHF",
     if (!is.na(runout_month))
       paste0(" | Runout: ", format(runout_month, "%Y-%m"),
@@ -1189,6 +1197,8 @@ ui <- page_navbar(
         uiOutput("ui_psp_select_fc"),
         sliderInput("burn_window_psp", "Burn rate window (months)",
                     min = 2, max = 12, value = 6, step = 1),
+        sliderInput("inflation_psp", "Inflation on spending (% / year)",
+                    min = 0, max = 3, value = 0, step = 0.25),
         uiOutput("ui_consumables_info_psp"),
         hr(),
         strong("Personnel — toggle to include/exclude"),
@@ -1206,6 +1216,8 @@ ui <- page_navbar(
       sidebar = sidebar(width = 280,
         sliderInput("burn_window", "Burn rate window (months)",
                     min = 2, max = 12, value = 6, step = 1),
+        sliderInput("inflation", "Inflation on spending (% / year)",
+                    min = 0, max = 3, value = 0, step = 0.25),
         helpText("Salary from Salaryplan.xlsx; consumables scaled by FTE from past window."),
         uiOutput("ui_consumables_info"),
         hr(),
@@ -2574,7 +2586,8 @@ Data up to: ",
     d_fc <- rv$data
     d_fc$salary_plan  <- sal_plan_psp()
     d_fc$investments  <- inv_filtered_psp()
-    p <- make_psp_forecast_plot(input$psp_id_fc, d_fc, input$burn_window_psp)
+    p <- make_psp_forecast_plot(input$psp_id_fc, d_fc, input$burn_window_psp,
+                                  inflation_rate = input$inflation_psp)
     if (is.null(p)) { plot.new(); text(0.5, 0.5, "No data available", cex = 1.5) } else p
   })
 
@@ -2583,7 +2596,8 @@ Data up to: ",
     d_fc <- rv$data
     d_fc$salary_plan <- sal_plan_tot()
     d_fc$investments <- inv_filtered_tot()
-    make_forecast_plot(d_fc, burn_window_months = input$burn_window)
+    make_forecast_plot(d_fc, burn_window_months = input$burn_window,
+                       inflation_rate = input$inflation)
   })
 }
 
