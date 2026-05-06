@@ -1634,7 +1634,7 @@ Data up to: ",
 
   # load investments on data load
   observeEvent(rv$data, {
-    req(rv$data)
+    req(rv$data, isTruthy(rv$data$raw_dir))
     inv_path <- file.path(rv$data$raw_dir, "Investments.xlsx")
     rv_inv$raw <- if (file.exists(inv_path)) {
       tryCatch(
@@ -1677,7 +1677,7 @@ Data up to: ",
 
 
   observeEvent(rv$data, {
-    req(rv$data)
+    req(rv$data, isTruthy(rv$data$raw_dir))
     zp_path <- file.path(rv$data$raw_dir, "Zahlungsplan.xlsx")
     existing_sheets <- if (file.exists(zp_path)) {
       sh_names <- excel_sheets(zp_path)
