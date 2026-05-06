@@ -8,6 +8,14 @@ An ETH lab budget monitoring + forecasting Shiny app. Single-user, run locally f
 
 See `README.md` for the user-facing workflow (which file to drop where, what each tab does).
 
+## Collaboration workflow
+
+Claude and the user **work in the same directory** — edits to `app.R` (or any file here) are immediately visible to the user's RStudio session. Git is used for backup/history only, not for syncing changes between Claude and the user.
+
+Implications:
+- After editing `app.R`, the user can reload the Shiny app (often with `Session → Restart R` first to flush cached function definitions) and test right away. Do **not** tell them to `git pull`.
+- Still commit and push when finishing a logical change so history exists, but treat that as backup, not as a step the user needs before testing.
+
 ## Critical: data confidentiality
 
 The user's budget data lives in a folder **outside this repository**, picked at runtime via the Load Data tab (`shinyDirButton`). The repo itself contains no real data. `.gitignore` still blocks `data_raw/`, `data/`, `*.xlsx`, `*.csv` as a safety net should anything leak in.
