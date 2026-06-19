@@ -40,31 +40,28 @@ There are no tests, no linter config, no build step.
 
 ## Code architecture
 
-### Two app files
-
-- **`app.R`** — current app, includes the Investments tab + investment forecasting toggles.
-- **`app_noinvestment.R`** — older variant without Investments. Kept as a working fallback. When changing logic shared between the two (loaders, forecast plots, heatmaps), confirm with the user whether the change should be ported to both — most edits should target `app.R` only.
-
 ### `app.R` is a monolithic single-file Shiny app
 
 There are no R modules and no `R/` directory. Everything (helpers, data loading, plotting, UI, server) is concatenated in `app.R`, separated by `# ====` banner comments. Major sections in order:
 
 | Lines (approx.) | Section | Key entry points |
 |---|---|---|
-| 1–22 | Library loads | shiny, bslib, here, readxl/writexl, tidyverse, lubridate, plotly, rhandsontable |
-| 25–100 | Salary-plan / Lohntabelle loaders | `load_salaryplan`, `load_lohntabelle` |
-| 102–145 | ID + Zahlungsplan helpers | `canonical_id`, `extract_zp_id`, `read_zahlungsplan` |
-| 148–227 | Spending category mapping | `CATEGORY_MAP` (German SAP labels → grouped categories) |
-| 231–432 | **Central data ingestion** | `load_all_data(ep_path)` |
-| 436–545 | Per-PSP monitoring plot | `make_psp_plot` |
-| 549–617 | Salary cost + balance interpolation | `compute_salary_cost`, `interpolate_balance` |
-| 621–811 | Total runway forecast | `make_forecast_plot` |
-| 815–1006 | Per-PSP runway forecast | `make_psp_forecast_plot` |
-| 1010–1066 | Salary heatmap | `make_salary_heatmap` |
-| 1070–1098 | Zahlungsplan heatmap | `make_zp_heatmap` |
-| 1102–1234 | UI (`page_navbar`, 9 `nav_panel`s) | `ui` |
-| 1238–2603 | Server | `server` |
-| 2604 | `shinyApp(ui, server)` |
+| 1–24 | Library loads | shiny, bslib, here, readxl/janitor/writexl, dplyr/tidyr/purrr/stringr/readr, lubridate, ggplot2/plotly/gridExtra, rhandsontable, shinyFiles |
+| 26–101 | Salary-plan / Lohntabelle loaders | `load_salaryplan`, `load_lohntabelle` |
+| 103–151 | ID + Zahlungsplan helpers | `canonical_id`, `extract_zp_id`, `read_zahlungsplan` |
+| 152–289 | Spending category mapping | `CATEGORY_MAP` (German SAP labels → grouped categories) |
+| 290–502 | **Central data ingestion** | `load_all_data(ep_path)` |
+| 503–615 | Per-PSP monitoring plot | `make_psp_plot` |
+| 616–687 | Salary cost + balance interpolation | `compute_salary_cost`, `interpolate_balance` |
+| 688–881 | Total runway forecast | `make_forecast_plot` |
+| 882–1076 | Per-PSP runway forecast | `make_psp_forecast_plot` |
+| 1077–1136 | Salary heatmap | `make_salary_heatmap` |
+| 1137–1168 | Zahlungsplan heatmap | `make_zp_heatmap` |
+| 1169–1306 | UI (`page_navbar`, 9 `nav_panel`s) | `ui` |
+| 1307–2719 | Server | `server` |
+| 2720 | `shinyApp(ui, server)` |
+
+Line numbers drift as the file is edited — find sections by their `# ====` banners or function names rather than trusting the numbers exactly.
 
 ### `load_all_data()` is the data spine
 
@@ -95,7 +92,7 @@ The data folder is **never** assumed to be `data_raw/` or any project-relative p
 
 ## Conventions worth keeping
 
-- 2-space indentation, UTF-8, POSIX line endings, trailing whitespace stripped (see `mybudgettools_zindel.Rproj`).
+- 2-space indentation, UTF-8, POSIX line endings, trailing whitespace stripped (see `ethisbudget.Rproj`).
 - Native pipe `|>` is used throughout; match that style rather than introducing `%>%`.
 - German domain terms stay in German (Einzelposten, Zahlungsplan, Konten, Lohntabelle, Buch_Dat, PSP) — these mirror the SAP source columns; do not anglicise them in code.
 - Banner comments (`# ==== ... ====`) demarcate sections; preserve them when inserting new helpers so the file stays navigable.
