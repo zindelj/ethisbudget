@@ -128,12 +128,17 @@ read_zahlungsplan <- function(f, dummy_date = as_date("2025-08-01")) {
   df <- df |> clean_names()
   if (!all(c("fallig", "betrag") %in% names(df)))
     return(tibble(id = id, date = dummy_date, planned_income = 0))
+  # Dates may arrive as real Excel Date objects OR as user-typed strings in
+  # day-first format (rhandsontable displays Dates as "13/1/2026", which users
+  # then mimic when typing new rows). Try ISO first, fall back to dmy().
   out <- df |>
     rename(date = fallig) |>
     mutate(id = id,
            planned_income = parse_number(as.character(betrag),
                                          locale = locale(decimal_mark = ".", grouping_mark = ",")),
-           date = suppressWarnings(as_date(date))) |>
+           date_iso = suppressWarnings(as_date(date)),
+           date_dmy = suppressWarnings(dmy(as.character(date))),
+           date     = if_else(is.na(date_iso), date_dmy, date_iso)) |>
     transmute(id, date, planned_income) |>
     filter(!is.na(date)) |>
     group_by(id, date) |>
@@ -293,6 +298,11 @@ load_all_data <- function(ep_path) {
   ist_raw <- read_excel(ep_path) |>
     clean_names() |>
     rename_with(~ str_replace_all(., "\\.", "_"))
+  # SAP renamed "Betrag in BW" -> "Betrag in BukrsWährung" in 2026; map back so the rest of the code is unchanged.
+  if (!"betrag_in_bw" %in% names(ist_raw)) {
+    amt_col <- grep("^betrag_in_", names(ist_raw), value = TRUE)
+    if (length(amt_col) == 1) ist_raw <- rename(ist_raw, betrag_in_bw = !!amt_col)
+  }
   if (!"buchungstext" %in% names(ist_raw)) ist_raw$buchungstext <- NA_character_
   ist_raw <- ist_raw |>
     mutate(
@@ -604,16 +614,62 @@ make_psp_plot <- function(psp_id, d) {
 }
 
 # ================================================================
+# Consumables-per-FTE rate (single source of truth)
+# ================================================================
+# Historical non-salary spend per FTE per month, calibrated over the burn
+# window. This is THE rate the forecast multiplies future FTE by, and the exact
+# value the "Consumables estimate" UI displays (×12 for CHF/FTE/year) — both go
+# through this function so the displayed number is always what's used.
+#
+# past_fte uses the UNFILTERED plan (salary_plan_full) so person include/exclude
+# toggles do not retroactively shrink the past team that actually generated the
+# spend. The plan only holds rows with amount > 0 (see load_salaryplan), so each
+# person counts only for months they were present/paid.
+consumables_per_fte_month <- function(d, burn_window_months, psp_id = NULL) {
+  today_month <- as_date(d$reference_date)
+  sp_full     <- d$salary_plan_full %||% d$salary_plan
+  startup_ids <- d$konten |> filter(typ == "Startup") |> pull(id)
+
+  ist_f <- if (!is.null(psp_id)) {
+    d$ist_raw |> filter(id == psp_id)
+  } else {
+    d$ist_raw |> filter(!id %in% startup_ids)
+  }
+  win_start <- today_month %m-% months(burn_window_months)
+  nonsalary_total <- tryCatch(
+    ist_f |> filter(month > win_start, month <= today_month,
+                    actual_spending > 0, !category %in% "Salary") |>
+      summarise(s = sum(actual_spending, na.rm = TRUE)) |> pull(s),
+    error = function(e) 0
+  )
+
+  past_fte <- if (!is.null(sp_full) && nrow(sp_full) > 0) {
+    sp_full_f <- sp_full |> mutate(month = as_date(month))
+    if (!is.null(psp_id)) sp_full_f <- sp_full_f |> filter(psp == psp_id)
+    v <- sp_full_f |>
+      filter(month <= today_month) |>
+      group_by(month) |>
+      summarise(fte_total = sum(fte, na.rm = TRUE), .groups = "drop") |>
+      arrange(desc(month)) |> slice_head(n = burn_window_months) |>
+      summarise(avg = mean(fte_total, na.rm = TRUE)) |> pull(avg)
+    if (length(v) == 0 || is.na(v)) 1 else v
+  } else 1
+
+  list(
+    per_fte_month   = nonsalary_total / (burn_window_months * max(past_fte, 0.01)),
+    nonsalary_total = nonsalary_total,
+    past_fte        = past_fte
+  )
+}
+
+# ================================================================
 # Salary-plan based cost (replaces compute_extra_cost)
 # ================================================================
 compute_salary_cost <- function(months_vec, d, burn_window_months, psp_id = NULL) {
-  today_month <- d$reference_date
-  sp          <- d$salary_plan
+  sp <- d$salary_plan
 
   # force all months to Date for reliable matching
   months_vec_d <- as_date(months_vec)
-
-  startup_ids <- d$konten |> filter(typ == "Startup") |> pull(id)
 
   if (!is.null(sp) && nrow(sp) > 0) {
     sp_f <- sp |> mutate(month = as_date(month))
@@ -628,34 +684,14 @@ compute_salary_cost <- function(months_vec, d, burn_window_months, psp_id = NULL
       filter(month %in% months_vec_d) |>
       group_by(month) |>
       summarise(fte_total = sum(fte, na.rm = TRUE), .groups = "drop")
-
-    past_fte <- sp_f |>
-      filter(month <= as_date(today_month)) |>
-      group_by(month) |>
-      summarise(fte_total = sum(fte, na.rm = TRUE), .groups = "drop") |>
-      arrange(desc(month)) |> slice_head(n = burn_window_months) |>
-      summarise(avg = mean(fte_total, na.rm = TRUE)) |> pull(avg)
-    if (length(past_fte) == 0 || is.na(past_fte)) past_fte <- 1
   } else {
     sal_by_month <- tibble(month = as_date(character()), salary = numeric())
     fte_by_month <- tibble(month = as_date(character()), fte_total = numeric())
-    past_fte     <- 1
   }
 
-  # Non-salary consumables per FTE per month from past window (exclude startup)
-  ist_f <- if (!is.null(psp_id)) {
-    d$ist_raw |> filter(id == psp_id)
-  } else {
-    d$ist_raw |> filter(!id %in% startup_ids)
-  }
-  win_start <- as_date(today_month) %m-% months(burn_window_months)
-  nonsalary_total <- tryCatch(
-    ist_f |> filter(month > win_start, month <= as_date(today_month),
-                    actual_spending > 0, !category %in% "Salary") |>
-      summarise(s = sum(actual_spending, na.rm = TRUE)) |> pull(s),
-    error = function(e) 0
-  )
-  nonsalary_per_fte_month <- nonsalary_total / (burn_window_months * max(past_fte, 0.01))
+  # Future salary/FTE come from the (possibly person-filtered) plan; the
+  # consumables rate is the shared historical calibration (unfiltered).
+  nonsalary_per_fte_month <- consumables_per_fte_month(d, burn_window_months, psp_id)$per_fte_month
 
   tibble(month = months_vec_d) |>
     left_join(sal_by_month, by = "month") |>
@@ -2500,30 +2536,10 @@ Data up to: ",
 
   consumables_info <- function(burn_window_months, psp_id = NULL) {
     req(rv$data)
-    d         <- rv$data
-    sp        <- rv_sal$plan %||% d$salary_plan
-    today     <- as_date(d$reference_date)
-    win_start <- today %m-% months(burn_window_months)
-    startup_ids <- d$konten |> filter(typ == "Startup") |> pull(id)
-    ist_f     <- if (!is.null(psp_id)) {
-      d$ist_raw |> filter(id == psp_id)
-    } else {
-      d$ist_raw |> filter(!id %in% startup_ids)
-    }
-    nonsalary <- tryCatch(
-      ist_f |> filter(month > win_start, month <= today,
-                      actual_spending > 0, !category %in% "Salary") |>
-        summarise(s = sum(actual_spending, na.rm = TRUE)) |> pull(s),
-      error = function(e) 0
-    )
-    past_fte <- if (!is.null(sp) && nrow(sp) > 0) {
-      sp_f <- sp |> mutate(month = as_date(month))
-      if (!is.null(psp_id)) sp_f <- sp_f |> filter(psp == psp_id)
-      sp_f |> filter(month > win_start, month <= today) |>
-        group_by(month) |> summarise(ft = sum(fte, na.rm=TRUE), .groups="drop") |>
-        summarise(avg = mean(ft)) |> pull(avg)
-    } else 1
-    per_fte_yr <- (nonsalary / burn_window_months) * 12 / max(past_fte, 0.01)
+    d <- rv$data
+    d$salary_plan_full <- rv_sal$plan   # show the rate for the full team
+    # Same helper the forecast uses → the displayed number IS the forecast input.
+    per_fte_yr <- consumables_per_fte_month(d, burn_window_months, psp_id)$per_fte_month * 12
     div(
       hr(),
       strong("Consumables estimate"),
@@ -2690,7 +2706,8 @@ Data up to: ",
   output$plot_forecast_psp <- renderPlot({
     req(rv$data, input$psp_id_fc)
     d_fc <- rv$data
-    d_fc$salary_plan  <- sal_plan_psp()
+    d_fc$salary_plan      <- sal_plan_psp()
+    d_fc$salary_plan_full <- rv_sal$plan   # unfiltered — calibrates past_fte
     d_fc$investments  <- inv_filtered_psp()
     p <- make_psp_forecast_plot(input$psp_id_fc, d_fc, input$burn_window_psp,
                                   inflation_rate = input$inflation_psp)
@@ -2700,7 +2717,8 @@ Data up to: ",
   output$plot_forecast <- renderPlot({
     req(rv$data)
     d_fc <- rv$data
-    d_fc$salary_plan <- sal_plan_tot()
+    d_fc$salary_plan      <- sal_plan_tot()
+    d_fc$salary_plan_full <- rv_sal$plan   # unfiltered — calibrates past_fte
     d_fc$investments <- inv_filtered_tot()
     make_forecast_plot(d_fc, burn_window_months = input$burn_window,
                        inflation_rate = input$inflation)
