@@ -748,9 +748,10 @@ make_forecast_plot <- function(d, burn_window_months = 6,
     group_by(month) |>
     summarise(spending_ist = sum(actual_spending, na.rm = TRUE), .groups = "drop")
 
-  past_months <- tibble(month = seq(
-    min(c(past_income_ist$month, kostenstelle_income$month, past_spending$month), na.rm = TRUE),
-    today_month, by = "1 month"))
+  past_start <- suppressWarnings(
+    min(c(past_income_ist$month, kostenstelle_income$month, past_spending$month), na.rm = TRUE))
+  if (is.infinite(past_start)) past_start <- today_month
+  past_months <- tibble(month = seq(past_start, today_month, by = "1 month"))
 
   ts_past <- past_months |>
     left_join(past_income_ist,    by = "month") |>
@@ -769,6 +770,7 @@ make_forecast_plot <- function(d, burn_window_months = 6,
     slice_head(n = burn_window_months) |>
     summarise(avg = mean(total_spending, na.rm = TRUE)) |>
     pull(avg)
+  if (!is.finite(burn_ref)) burn_ref <- 0  # no past spending months at all
 
   future_income <- planned_income_m |>
     filter(month > today_month, !id %in% exclude_all,
@@ -937,9 +939,12 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
   past_spending <- ist_psp |> filter(month <= today_month) |>
     select(month, total_spending = actual_spending)
 
-  past_months <- tibble(month = seq(
-    min(c(past_income$month, past_spending$month), na.rm = TRUE),
-    today_month, by = "1 month"))
+  # A PSP whose funding lies entirely in the future (e.g. a new grant with no
+  # bookings yet) has no past rows at all — start the timeline at today instead.
+  past_start <- suppressWarnings(
+    min(c(past_income$month, past_spending$month), na.rm = TRUE))
+  if (is.infinite(past_start)) past_start <- today_month
+  past_months <- tibble(month = seq(past_start, today_month, by = "1 month"))
 
   ts_past <- past_months |>
     left_join(past_income,   by = "month") |>
@@ -955,6 +960,7 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
     slice_head(n = burn_window_months) |>
     summarise(avg = mean(total_spending, na.rm = TRUE)) |>
     pull(avg)
+  if (!is.finite(burn_ref)) burn_ref <- 0  # no past spending months at all
 
   # Future
   future_income <- planned_income_m |>
