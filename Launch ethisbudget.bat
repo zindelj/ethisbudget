@@ -5,15 +5,21 @@ rem automatically when the app is ready. Closing this window stops the app.
 setlocal
 cd /d "%~dp0"
 
-rem If the app is already running, open it in the browser instead of
-rem starting a second server (which would fail: port already in use).
+rem If the app is already running, offer to open it or restart it fresh
+rem (a second server on the same port would fail: address already in use).
 powershell -NoProfile -Command "try{(New-Object Net.Sockets.TcpClient('127.0.0.1',4242)).Close();exit 0}catch{exit 1}"
 if not errorlevel 1 (
-  echo ethisbudget is already running - opening it in the browser.
-  echo To restart the app instead, close its server window first.
-  start "" http://localhost:4242
-  timeout /t 4 >nul
-  exit /b 0
+  echo ethisbudget is already running.
+  choice /c OR /m "O = open the running app, R = restart it fresh"
+  if errorlevel 2 (
+    echo Stopping the old app...
+    for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":4242" ^| findstr "LISTENING"') do taskkill /F /PID %%p >nul 2>&1
+    timeout /t 2 >nul
+  ) else (
+    start "" http://localhost:4242
+    timeout /t 4 >nul
+    exit /b 0
+  )
 )
 
 set "RSCRIPT="
