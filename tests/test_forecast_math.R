@@ -71,7 +71,23 @@ ok("total forecast builds (ggplot)", inherits(p1, "ggplot") || inherits(p1, "gro
 b1 <- ggplot_build(p1); b2 <- ggplot_build(p2)  # smoke: renders without error
 ok("total forecast renders with and without EPIC", TRUE)
 
-# 5. per-PSP forecast for the grant with no bookings (regression: empty past)
+# 5. person switching PSP mid-series (e.g. SNF 4-year limit): each month is
+#    charged to that month's PSP only; FTE (consumables) moves with them and
+#    is never double-counted across PSPs or in the total.
+d2 <- d
+d2$salary_plan <- d2$salary_plan_full <- bind_rows(
+  tibble(name = "C", month = as_date(c("2026-07-01", "2026-08-01")),
+         amount = 6000, psp = "K1", role = "PhD Student", fte = 1),
+  tibble(name = "C", month = as_date("2026-09-01"),
+         amount = 6000, psp = "G1", role = "PhD Student", fte = 1))
+on_k1 <- compute_salary_cost(fut, d2, 6, psp_id = "K1", consumables_rate_month = 1200)
+on_g1 <- compute_salary_cost(fut, d2, 6, psp_id = "G1", consumables_rate_month = 1200)
+tot   <- compute_salary_cost(fut, d2, 6, psp_id = NULL, consumables_rate_month = 1200)
+ok("PSP switch: K1 pays Jul+Aug only (7200,7200,0)", all(abs(on_k1 - c(7200, 7200, 0)) < 1e-6))
+ok("PSP switch: G1 pays Sep only (0,0,7200)",        all(abs(on_g1 - c(0, 0, 7200)) < 1e-6))
+ok("PSP switch: total counts each month once",       all(abs(tot - (on_k1 + on_g1)) < 1e-6))
+
+# 6. per-PSP forecast for the grant with no bookings (regression: empty past)
 p3 <- make_psp_forecast_plot("G1", d, 6, consumables_rate_month = 1200, epic_monthly = 0)
 ok("PSP forecast for booking-less grant builds", !is.null(p3))
 invisible(ggplot_build(p3))
