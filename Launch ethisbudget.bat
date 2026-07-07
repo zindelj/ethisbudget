@@ -5,6 +5,17 @@ rem automatically when the app is ready. Closing this window stops the app.
 setlocal
 cd /d "%~dp0"
 
+rem If the app is already running, open it in the browser instead of
+rem starting a second server (which would fail: port already in use).
+powershell -NoProfile -Command "try{(New-Object Net.Sockets.TcpClient('127.0.0.1',4242)).Close();exit 0}catch{exit 1}"
+if not errorlevel 1 (
+  echo ethisbudget is already running - opening it in the browser.
+  echo To restart the app instead, close its server window first.
+  start "" http://localhost:4242
+  timeout /t 4 >nul
+  exit /b 0
+)
+
 set "RSCRIPT="
 for /f "delims=" %%p in ('where Rscript.exe 2^>nul') do if not defined RSCRIPT set "RSCRIPT=%%p"
 if not defined RSCRIPT for /f "tokens=2,*" %%a in ('reg query "HKCU\SOFTWARE\R-core\R" /v InstallPath 2^>nul ^| find "InstallPath"') do set "RSCRIPT=%%b\bin\Rscript.exe"
