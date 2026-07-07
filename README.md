@@ -15,7 +15,7 @@ Place an SAP export named **`export_YYYYMMDD_HHMMSS.xlsx`** (e.g. `export_202605
 ### First run
 
 1. Drop your `export_YYYYMMDD_HHMMSS.xlsx` into a folder of your choice.
-2. Open `app.R` in RStudio and click **Run App**.
+2. Open `app.R` in RStudio and click **Run App** — or skip RStudio entirely and double-click **`Launch ethisbudget.bat`** in the project folder (starts the app and opens your browser at `http://localhost:4242`; close the console window to stop it).
 3. Go to **📁 Load Data**, click **Browse folder…**, select your data folder, then click **Load**.
 4. The app will auto-create empty templates for anything missing in that same folder:
    - `Konten.xlsx` — pre-filled with all PSP IDs found in the EP
