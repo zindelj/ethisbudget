@@ -385,7 +385,16 @@ load_all_data <- function(ep_path) {
       ),
       typ = trimws(as.character(typ))
     ) |>
-    filter(!is.na(id), !tolower(typ) %in% c("erlöse", "na", NA))
+    filter(!is.na(id))
+
+  # Erlöse kontos stay in the working list: their (small) revenue counts in
+  # the lab-wide totals, and downstream UI filters keep them out of the
+  # per-PSP selection lists. Kontos WITHOUT a Typ can't be classified at all —
+  # exclude them like before, but report it (health, below) instead of
+  # dropping silently.
+  typless_ids <- konten |>
+    filter(is.na(typ) | tolower(typ) %in% c("", "na")) |> pull(id)
+  konten <- konten |> filter(!id %in% typless_ids)
 
   # only append skeleton rows when bootstrapping — never silently modify an existing Konten
   if (konten_bootstrapped) {
@@ -552,6 +561,11 @@ load_all_data <- function(ep_path) {
   if (length(no_bookings) > 0)
     health <- c(health, paste0("Konto '", no_bookings,
       "' has no bookings in the Einzelposten yet (new grant?) — its past shows as zero."))
+
+  if (length(typless_ids) > 0)
+    health <- c(health, paste0("Konto '", typless_ids,
+      "' has no Typ in Konten.xlsx — it is IGNORED everywhere until you set one ",
+      "(Grant, Kostenstelle, Startup, Reserve or Erlöse)."))
 
   list(konten = konten, konten_raw = konten_raw,
        zahlungsplan = zahlungsplan_combined,
@@ -1718,8 +1732,7 @@ server <- function(input, output, session) {
     konten       <- d$konten
     kostenstelle_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
     startup_ids      <- konten |> filter(typ == "Startup")      |> pull(id)
-    exclude_ids      <- konten |> filter(typ == "Erlöse")       |> pull(id)
-    exclude_all      <- c(startup_ids, exclude_ids)
+    exclude_all      <- startup_ids   # Erlöse revenue counts in the totals
 
     cur_year <- year(today_month)
 
@@ -1799,8 +1812,7 @@ server <- function(input, output, session) {
     startup_ids      <- konten |> filter(typ == "Startup")      |> pull(id)
     kostenstelle_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
     reserve_ids      <- konten |> filter(typ == "Reserve")      |> pull(id)
-    exclude_ids      <- konten |> filter(typ == "Erlöse")       |> pull(id)
-    exclude_all      <- c(startup_ids, exclude_ids)
+    exclude_all      <- startup_ids   # Erlöse revenue counts in the totals
 
     ist_ns <- ist_monthly |> filter(!id %in% exclude_all)
 
@@ -1862,7 +1874,7 @@ server <- function(input, output, session) {
       scale_x_date(date_breaks = "1 month", date_labels = "%b",
                    expand = expansion(mult = c(0.01, 0.02))) +
       scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
-      labs(title = paste0("Monitoring: All PSPs (excl. Startup & Erlöse)
+      labs(title = paste0("Monitoring: All PSPs (excl. Startup)
 Data up to: ",
                           format(today_month, "%Y-%m"), " | Balance: ",
                           format(round(last(ts$balance)), big.mark = "'"), " CHF"),
