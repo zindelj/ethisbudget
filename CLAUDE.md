@@ -36,7 +36,7 @@ shiny::runApp("app.R")
 renv::restore()
 ```
 
-There are no tests, no linter config, no build step.
+Synthetic-data tests live in `tests/` — run from the repo root with `Rscript --vanilla tests/test_forecast_math.R` and `Rscript --vanilla tests/test_health.R`. They parse the needed function definitions straight out of `app.R` (no Shiny session required) and pin down the forecast math (consumables rate, EPIC line, salary cost) and the data-health reporting. Run them after touching those functions. There is no linter config and no build step.
 
 ## Code architecture
 
@@ -70,7 +70,7 @@ This function (around line 231) is the only place that touches the filesystem du
 1. Receives `ep_path` (the full path to the chosen `export_*.xlsx`) and derives `raw_dir <- dirname(ep_path)`. Every other file read/written by the function lives in that same folder.
 2. Reads the EP Excel, cleans column names, parses dates, classifies each row into a category via `CATEGORY_MAP`.
 3. **Bootstraps missing side-files** in `raw_dir` from the PSP IDs found in the EP — empty `Konten.xlsx`, per-PSP tabs in `Zahlungsplan.xlsx`, empty `Salaryplan.xlsx`, `Investments.xlsx`. This is why the README says "Everything else is created automatically on first load."
-4. Returns a named list `d` (konten, ist_monthly, planned_income_m, expected_burn, salary_plan, zahlungsplan, investments, reference_date, **raw_dir**, …) that is the **single object passed into every plotting and forecast function downstream**. The `raw_dir` field is what server save/load handlers use when writing back to disk — never re-derive it elsewhere.
+4. Returns a named list `d` (konten, ist_monthly, planned_income_m, expected_burn, salary_plan, zahlungsplan, investments, reference_date, **raw_dir**, **health**, …) that is the **single object passed into every plotting and forecast function downstream**. `health` is a character vector of data-quality notices (rows dropped by parsers, IDs that don't cross-match between files) rendered on the Load Data tab — when adding a new parser, append its dropped-row report there rather than discarding bad rows silently. The `raw_dir` field is what server save/load handlers use when writing back to disk — never re-derive it elsewhere.
 
 When adding a new field that plots or the server need, add it to this returned list rather than re-reading files elsewhere.
 

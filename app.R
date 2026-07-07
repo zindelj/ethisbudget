@@ -27,33 +27,53 @@ load_salaryplan <- function(path) {
   sheets <- excel_sheets(path)
 
   # New format: multiple sheets = one per person (Month | CHF | PSP | Role | FTE)
+  # Each sheet returns list(data=..., notes=...) so parse failures surface in
+  # the data-health report instead of vanishing.
   if (length(sheets) > 1) {
     result <- lapply(sheets, function(nm) {
       tryCatch({
         df        <- read_excel(path, sheet = nm)
-        if (ncol(df) < 2) return(NULL)
+        if (ncol(df) < 2) return(list(data = NULL, notes = paste0(
+          "Salaryplan sheet '", nm, "' skipped: fewer than 2 columns.")))
         col_lower <- tolower(names(df))
         month_col <- which(str_detect(col_lower, "month|datum|date"))[1]
         chf_col   <- which(str_detect(col_lower, "chf|amount|betrag|salary"))[1]
         psp_col   <- which(str_detect(col_lower, "psp|projekt|grant"))[1]
         role_col  <- which(str_detect(col_lower, "role|rolle"))[1]
         fte_col   <- which(str_detect(col_lower, "fte"))[1]
-        if (is.na(month_col) || is.na(chf_col)) return(NULL)
+        if (is.na(month_col) || is.na(chf_col)) return(list(data = NULL, notes = paste0(
+          "Salaryplan sheet '", nm, "' skipped: no Month/CHF column recognised.")))
         psp_vals  <- if (length(psp_col)  > 0 && !is.na(psp_col))  canonical_id(str_trim(as.character(df[[psp_col]])))  else rep(NA_character_, nrow(df))
         role_vals <- if (length(role_col) > 0 && !is.na(role_col)) str_trim(as.character(df[[role_col]]))                else rep("Other", nrow(df))
         fte_vals  <- if (length(fte_col)  > 0 && !is.na(fte_col))  as.numeric(df[[fte_col]])                             else rep(1, nrow(df))
-        tibble(
+        raw_month <- as.character(df[[month_col]])
+        raw_chf   <- as.character(df[[chf_col]])
+        tib <- tibble(
           name   = nm,
-          month  = as_date(as.character(df[[month_col]])),
-          amount = suppressWarnings(as.numeric(str_remove_all(as.character(df[[chf_col]]), "[, ]"))),
+          month  = suppressWarnings(as_date(raw_month)),
+          amount = suppressWarnings(as.numeric(str_remove_all(raw_chf, "[, ]"))),
           psp    = psp_vals,
           role   = role_vals,
           fte    = fte_vals
-        ) |> filter(!is.na(month), !is.na(amount), amount > 0)
-      }, error = function(e) NULL)
+        )
+        # a filled cell that failed to parse = silent data loss → report it
+        bad <- (!is.na(raw_month) & raw_month != "" & is.na(tib$month)) |
+               (!is.na(raw_chf)   & raw_chf   != "" & is.na(tib$amount))
+        notes <- if (any(bad)) paste0(
+          "Salaryplan '", nm, "': ", sum(bad), " row(s) DROPPED — unparseable ",
+          "Month/CHF (first: Month='", raw_month[which(bad)[1]],
+          "', CHF='", raw_chf[which(bad)[1]], "'). Use ISO dates (2026-10-01).")
+        else character()
+        list(data = tib |> filter(!is.na(month), !is.na(amount), amount > 0),
+             notes = notes)
+      }, error = function(e) list(data = NULL, notes = paste0(
+        "Salaryplan sheet '", nm, "' failed to read: ", conditionMessage(e))))
     })
-    out <- bind_rows(result)
-    if (nrow(out) > 0) return(out)
+    out <- bind_rows(lapply(result, `[[`, "data"))
+    if (nrow(out) > 0) {
+      attr(out, "health") <- unlist(lapply(result, `[[`, "notes"))
+      return(out)
+    }
   }
 
   # Old/fallback: single wide sheet
@@ -126,24 +146,39 @@ read_zahlungsplan <- function(f, dummy_date = as_date("2025-08-01")) {
   if (nrow(df) == 0 || ncol(df) == 0)
     return(tibble(id = id, date = dummy_date, planned_income = 0))
   df <- df |> clean_names()
-  if (!all(c("fallig", "betrag") %in% names(df)))
-    return(tibble(id = id, date = dummy_date, planned_income = 0))
+  if (!all(c("fallig", "betrag") %in% names(df))) {
+    out <- tibble(id = id, date = dummy_date, planned_income = 0)
+    attr(out, "health") <- paste0("Zahlungsplan '", id,
+      "': no Fällig/Betrag columns recognised — tab treated as empty.")
+    return(out)
+  }
   # Dates may arrive as real Excel Date objects OR as user-typed strings in
   # day-first format (rhandsontable displays Dates as "13/1/2026", which users
   # then mimic when typing new rows). Try ISO first, fall back to dmy().
-  out <- df |>
-    rename(date = fallig) |>
+  parsed <- df |>
+    rename(date_raw = fallig) |>
     mutate(id = id,
            planned_income = parse_number(as.character(betrag),
                                          locale = locale(decimal_mark = ".", grouping_mark = ",")),
-           date_iso = suppressWarnings(as_date(date)),
-           date_dmy = suppressWarnings(dmy(as.character(date))),
-           date     = if_else(is.na(date_iso), date_dmy, date_iso)) |>
+           date_iso = suppressWarnings(as_date(date_raw)),
+           date_dmy = suppressWarnings(dmy(as.character(date_raw))),
+           date     = if_else(is.na(date_iso), date_dmy, date_iso))
+  # a filled cell that failed to parse = silent data loss → report it
+  bad <- (!is.na(parsed$date_raw) & as.character(parsed$date_raw) != "" & is.na(parsed$date)) |
+         (!is.na(parsed$betrag)   & as.character(parsed$betrag)   != "" & is.na(parsed$planned_income))
+  notes <- if (any(bad)) paste0(
+    "Zahlungsplan '", id, "': ", sum(bad), " row(s) DROPPED — unparseable ",
+    "Fällig/Betrag (first: Fällig='", as.character(parsed$date_raw)[which(bad)[1]],
+    "', Betrag='", as.character(parsed$betrag)[which(bad)[1]], "').")
+  else character()
+  out <- parsed |>
     transmute(id, date, planned_income) |>
     filter(!is.na(date)) |>
     group_by(id, date) |>
     summarise(planned_income = sum(planned_income, na.rm = TRUE), .groups = "drop")
-  if (nrow(out) == 0) tibble(id = id, date = dummy_date, planned_income = 0) else out
+  if (nrow(out) == 0) out <- tibble(id = id, date = dummy_date, planned_income = 0)
+  attr(out, "health") <- notes
+  out
 }
 
 safe_max_date <- function(x) { x <- x[!is.na(x)]; if (length(x) == 0) NA_Date_ else max(x) }
@@ -382,7 +417,9 @@ load_all_data <- function(ep_path) {
     writexl::write_xlsx(df, tmp)
     tmp
   })
-  zahlungsplan <- map_df(zp_files_list, ~ read_zahlungsplan(.x, as_date("2025-08-01"))) |>
+  zp_reads  <- lapply(zp_files_list, read_zahlungsplan, dummy_date = as_date("2025-08-01"))
+  zp_health <- unlist(lapply(zp_reads, attr, "health"))
+  zahlungsplan <- bind_rows(zp_reads) |>
     group_by(id, date) |>
     summarise(planned_income = sum(planned_income, na.rm = TRUE), .groups = "drop")
 
@@ -492,12 +529,36 @@ load_all_data <- function(ep_path) {
     }
   }, error = function(e) empty_investments)
 
+  # --- Data health: everything that was dropped or doesn't cross-match ------
+  # Collected here and surfaced on the Load Data tab so silent data loss
+  # becomes visible instead of quietly skewing forecasts.
+  health <- c(zp_health, attr(salary_plan, "health"))
+
+  zp_unmatched <- setdiff(unique(zahlungsplan$id), konten$id)
+  if (length(zp_unmatched) > 0)
+    health <- c(health, paste0("Zahlungsplan tab '", zp_unmatched,
+      "' matches no konto in Konten.xlsx — income counts in Forecast (Total) ",
+      "but the PSP has no monitoring/forecast of its own. Check the ID."))
+
+  if (!is.null(salary_plan) && nrow(salary_plan) > 0) {
+    sp_unmatched <- setdiff(unique(salary_plan$psp[!is.na(salary_plan$psp)]), konten$id)
+    if (length(sp_unmatched) > 0)
+      health <- c(health, paste0("Salaryplan PSP '", sp_unmatched,
+        "' matches no konto — these salary months count in Forecast (Total) ",
+        "but in no per-PSP forecast. Check the ID."))
+  }
+
+  no_bookings <- setdiff(konten$id, unique(ist_monthly$id))
+  if (length(no_bookings) > 0)
+    health <- c(health, paste0("Konto '", no_bookings,
+      "' has no bookings in the Einzelposten yet (new grant?) — its past shows as zero."))
+
   list(konten = konten, konten_raw = konten_raw,
        zahlungsplan = zahlungsplan_combined,
        expected_burn = expected_burn_df, ist_monthly = ist_monthly,
        planned_income_m = planned_income_m, reference_date = reference_date,
        ist_raw = ist_raw, lohntabelle = lohntabelle, salary_plan = salary_plan,
-       investments = investments, raw_dir = raw_dir)
+       investments = investments, raw_dir = raw_dir, health = health)
 }
 
 # ================================================================
@@ -616,37 +677,34 @@ make_psp_plot <- function(psp_id, d) {
 # ================================================================
 # Consumables-per-FTE rate (single source of truth)
 # ================================================================
-# Historical non-salary spend per FTE per month, calibrated over the burn
-# window. This is THE rate the forecast multiplies future FTE by, and the exact
-# value the "Consumables estimate" UI displays (×12 for CHF/FTE/year) — both go
-# through this function so the displayed number is always what's used.
+# Historical non-salary, non-EPIC spend per FTE per month, calibrated GLOBALLY
+# (all grants, Startup excluded) over the burn window. EPIC (animal facility)
+# is excluded because it is a background cost largely independent of FTE — it
+# gets its own forecast line (see epic_monthly_avg). This rate is what the
+# sidebar suggests as CHF/FTE/year; the sidebar value (suggested or manually
+# overridden) is exactly what the forecast multiplies future FTE by.
 #
 # past_fte uses the UNFILTERED plan (salary_plan_full) so person include/exclude
 # toggles do not retroactively shrink the past team that actually generated the
 # spend. The plan only holds rows with amount > 0 (see load_salaryplan), so each
 # person counts only for months they were present/paid.
-consumables_per_fte_month <- function(d, burn_window_months, psp_id = NULL) {
+consumables_per_fte_month <- function(d, burn_window_months) {
   today_month <- as_date(d$reference_date)
   sp_full     <- d$salary_plan_full %||% d$salary_plan
   startup_ids <- d$konten |> filter(typ == "Startup") |> pull(id)
 
-  ist_f <- if (!is.null(psp_id)) {
-    d$ist_raw |> filter(id == psp_id)
-  } else {
-    d$ist_raw |> filter(!id %in% startup_ids)
-  }
+  ist_f <- d$ist_raw |> filter(!id %in% startup_ids)
   win_start <- today_month %m-% months(burn_window_months)
   nonsalary_total <- tryCatch(
     ist_f |> filter(month > win_start, month <= today_month,
-                    actual_spending > 0, !category %in% "Salary") |>
+                    actual_spending > 0, !category %in% c("Salary", "EPIC")) |>
       summarise(s = sum(actual_spending, na.rm = TRUE)) |> pull(s),
     error = function(e) 0
   )
 
   past_fte <- if (!is.null(sp_full) && nrow(sp_full) > 0) {
-    sp_full_f <- sp_full |> mutate(month = as_date(month))
-    if (!is.null(psp_id)) sp_full_f <- sp_full_f |> filter(psp == psp_id)
-    v <- sp_full_f |>
+    v <- sp_full |>
+      mutate(month = as_date(month)) |>
       filter(month <= today_month) |>
       group_by(month) |>
       summarise(fte_total = sum(fte, na.rm = TRUE), .groups = "drop") |>
@@ -663,9 +721,32 @@ consumables_per_fte_month <- function(d, burn_window_months, psp_id = NULL) {
 }
 
 # ================================================================
+# EPIC background cost (animal facility)
+# ================================================================
+# Average monthly EPIC spend over the burn window (bills arrive quarterly, so
+# the window average smooths them). Per-PSP when psp_id given, lab-wide
+# otherwise. Like the consumables rate, this is the SUGGESTION shown in the
+# forecast sidebar; the sidebar value is what actually enters the forecast.
+epic_monthly_avg <- function(d, burn_window_months, psp_id = NULL) {
+  today_month <- as_date(d$reference_date)
+  win_start   <- today_month %m-% months(burn_window_months)
+  ist_f <- d$ist_raw |> filter(category == "EPIC")
+  if (!is.null(psp_id)) ist_f <- ist_f |> filter(id == psp_id)
+  tot <- tryCatch(
+    ist_f |> filter(month > win_start, month <= today_month, actual_spending > 0) |>
+      summarise(s = sum(actual_spending, na.rm = TRUE)) |> pull(s),
+    error = function(e) 0
+  )
+  tot / burn_window_months
+}
+
+# ================================================================
 # Salary-plan based cost (replaces compute_extra_cost)
 # ================================================================
-compute_salary_cost <- function(months_vec, d, burn_window_months, psp_id = NULL) {
+# consumables_rate_month: CHF per FTE per month. NULL = auto-calibrate (the
+# same global rate the sidebar suggests); 0 = consumables toggled off.
+compute_salary_cost <- function(months_vec, d, burn_window_months, psp_id = NULL,
+                                consumables_rate_month = NULL) {
   sp <- d$salary_plan
 
   # force all months to Date for reliable matching
@@ -690,8 +771,10 @@ compute_salary_cost <- function(months_vec, d, burn_window_months, psp_id = NULL
   }
 
   # Future salary/FTE come from the (possibly person-filtered) plan; the
-  # consumables rate is the shared historical calibration (unfiltered).
-  nonsalary_per_fte_month <- consumables_per_fte_month(d, burn_window_months, psp_id)$per_fte_month
+  # consumables rate is either the explicit sidebar value or the shared
+  # global calibration (identical to the sidebar suggestion).
+  nonsalary_per_fte_month <- consumables_rate_month %||%
+    consumables_per_fte_month(d, burn_window_months)$per_fte_month
 
   tibble(month = months_vec_d) |>
     left_join(sal_by_month, by = "month") |>
@@ -714,9 +797,14 @@ interpolate_balance <- function(df, by = "week") {
 # ================================================================
 # Forecast / runout plot (from 04_, minimal changes)
 # ================================================================
+# consumables_rate_month / epic_monthly: explicit sidebar values (0 = toggled
+# off); NULL falls back to the auto-calibrated suggestion, so plot and sidebar
+# can never disagree.
 make_forecast_plot <- function(d, burn_window_months = 6,
                                 exclude_ids = character(),
-                                inflation_rate = 0) {
+                                inflation_rate = 0,
+                                consumables_rate_month = NULL,
+                                epic_monthly = NULL) {
   konten          <- d$konten
   ist_monthly     <- d$ist_monthly
   planned_income_m<- d$planned_income_m
@@ -785,8 +873,13 @@ make_forecast_plot <- function(d, burn_window_months = 6,
   if (start_future > horizon_end) horizon_end <- start_future %m+% months(24)
 
   future_months_vec  <- seq(start_future, horizon_end, by = "1 month")
-  salary_cost        <- compute_salary_cost(future_months_vec, d, burn_window_months, psp_id = NULL)
+  salary_cost        <- compute_salary_cost(future_months_vec, d, burn_window_months, psp_id = NULL,
+                                            consumables_rate_month = consumables_rate_month)
   nonsalary_burn     <- if (!is.null(d$salary_plan)) 0 else burn_ref
+  # EPIC only as its own line when the salary-plan model is active; the
+  # burn_ref fallback is a total historical average that already contains it.
+  epic_cost          <- if (is.null(d$salary_plan)) 0
+                        else epic_monthly %||% epic_monthly_avg(d, burn_window_months)
 
   # investments: future one-off costs
   inv <- if (!is.null(d$investments) && nrow(d$investments) > 0)
@@ -801,7 +894,7 @@ make_forecast_plot <- function(d, burn_window_months = 6,
            inv_cost       = replace_na(inv_cost, 0),
            months_ahead   = as.numeric(interval(start_future, month) / months(1)),
            infl_mult      = (1 + inflation_rate / 100) ^ (months_ahead / 12),
-           total_spending = (nonsalary_burn + salary_cost) * infl_mult + inv_cost,
+           total_spending = (nonsalary_burn + salary_cost + epic_cost) * infl_mult + inv_cost,
            balance        = current_surplus + cumsum(total_income - total_spending)) |>
     select(-months_ahead, -infl_mult)
 
@@ -838,6 +931,8 @@ make_forecast_plot <- function(d, burn_window_months = 6,
     "Data up to: ", format(today_month, "%Y-%m"),
     " | Avg spend (last ", burn_window_months, "m): ",
     format(round(burn_ref), big.mark = "'"), " CHF",
+    if (!is.null(d$salary_plan))
+      paste0(" | EPIC: ", format(round(epic_cost), big.mark = "'"), " CHF/m") else "",
     " | Surplus: ", format(round(current_surplus), big.mark = "'"), " CHF",
     if (!is.na(runout_month))
       paste0(" | Runout: ", format(runout_month, "%Y-%m"),
@@ -910,7 +1005,11 @@ make_forecast_plot <- function(d, burn_window_months = 6,
 # ================================================================
 # Per-PSP forecast plot
 # ================================================================
-make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_rate = 0) {
+# consumables_rate_month / epic_monthly: explicit sidebar values (0 = toggled
+# off); NULL falls back to the auto-calibrated suggestion (EPIC per-PSP here).
+make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_rate = 0,
+                                   consumables_rate_month = NULL,
+                                   epic_monthly = NULL) {
   konten          <- d$konten
   ist_monthly     <- d$ist_monthly
   planned_income_m<- d$planned_income_m
@@ -978,8 +1077,11 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
   if (start_future > horizon_end) horizon_end <- start_future %m+% months(12)
 
   future_months_vec  <- seq(start_future, horizon_end, by = "1 month")
-  salary_cost        <- compute_salary_cost(future_months_vec, d, burn_window_months, psp_id = psp_id)
+  salary_cost        <- compute_salary_cost(future_months_vec, d, burn_window_months, psp_id = psp_id,
+                                            consumables_rate_month = consumables_rate_month)
   nonsalary_burn     <- if (!is.null(d$salary_plan)) 0 else burn_ref
+  epic_cost          <- if (is.null(d$salary_plan)) 0
+                        else epic_monthly %||% epic_monthly_avg(d, burn_window_months, psp_id)
 
   # investments for this PSP
   inv_psp <- if (!is.null(d$investments) && nrow(d$investments) > 0)
@@ -994,7 +1096,7 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
            inv_cost       = replace_na(inv_cost, 0),
            months_ahead   = as.numeric(interval(start_future, month) / months(1)),
            infl_mult      = (1 + inflation_rate / 100) ^ (months_ahead / 12),
-           total_spending = (nonsalary_burn + salary_cost) * infl_mult + inv_cost,
+           total_spending = (nonsalary_burn + salary_cost + epic_cost) * infl_mult + inv_cost,
            balance        = current_surplus + cumsum(total_income - total_spending)) |>
     select(-months_ahead, -infl_mult)
 
@@ -1035,6 +1137,8 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
     "Data up to: ", format(today_month, "%Y-%m"),
     " | Avg spend (last ", burn_window_months, "m): ",
     format(round(burn_ref), big.mark = "'"), " CHF",
+    if (!is.null(d$salary_plan))
+      paste0(" | EPIC: ", format(round(epic_cost), big.mark = "'"), " CHF/m") else "",
     if (inflation_rate > 0) paste0(" | Inflation: ", inflation_rate, "%/yr") else "",
     " | Surplus: ", format(round(current_surplus), big.mark = "'"), " CHF",
     if (!is.na(runout_month))
@@ -1199,6 +1303,52 @@ make_zp_heatmap <- function(zp_data) {
 
 
 # ================================================================
+# EPIC monitoring plot
+# ================================================================
+# EPIC bills arrive quarterly, so raw monthly bars are spiky. Bars show booked
+# EPIC spend per month (stacked by PSP); the step line is the trailing
+# avg_window-month average — computed identically to epic_monthly_avg, so the
+# right end of the line IS the number the forecast sidebar suggests at the
+# same window.
+make_epic_plot <- function(d, avg_window = 12) {
+  df <- d$ist_raw |> filter(category == "EPIC", actual_spending != 0)
+  if (nrow(df) == 0) return(NULL)
+
+  by_psp <- df |>
+    group_by(month, id) |>
+    summarise(value = sum(actual_spending, na.rm = TRUE), .groups = "drop")
+
+  grid <- tibble(month = seq(min(by_psp$month), max(by_psp$month), by = "1 month"))
+  monthly <- grid |>
+    left_join(by_psp |> group_by(month) |>
+                summarise(value = sum(value), .groups = "drop"), by = "month") |>
+    mutate(value = replace_na(value, 0),
+           trail = sapply(seq_along(month), \(i)
+             mean(value[max(1, i - avg_window + 1):i])))
+
+  current_avg <- last(monthly$trail)
+
+  ggplot() +
+    geom_col(data = by_psp, aes(x = month, y = value, fill = id),
+             position = "stack", width = 25, alpha = 0.85) +
+    geom_step(data = monthly, aes(x = month, y = trail),
+              linewidth = 1, color = "grey20") +
+    scale_fill_brewer(palette = "Set2", name = "PSP") +
+    scale_x_date(date_breaks = "3 months", date_labels = "%b %y") +
+    scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
+    labs(title    = "EPIC (animal facility) costs",
+         subtitle = paste0("Bars: booked per month (bills usually quarterly). ",
+                           "Line: trailing ", avg_window, "-month average — currently ",
+                           format(round(current_avg), big.mark = "'"), " CHF/month."),
+         x = NULL, y = "CHF / month") +
+    theme_bw(base_size = 12) +
+    theme(plot.title    = element_text(face = "bold"),
+          axis.text.x   = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.minor = element_blank(),
+          legend.position  = "bottom")
+}
+
+# ================================================================
 # UI
 # ================================================================
 ui <- page_navbar(
@@ -1214,7 +1364,8 @@ ui <- page_navbar(
       shinyDirButton("data_dir_btn", "Browse folder…", "Select data folder", class = "btn-outline-primary"),
       uiOutput("ui_data_dir_status"),
       actionButton("btn_load", "Load", class = "btn-primary mt-2"),
-      uiOutput("ui_load_status")
+      uiOutput("ui_load_status"),
+      uiOutput("ui_data_health")
     )
   ),
 
@@ -1235,6 +1386,20 @@ ui <- page_navbar(
     tagList(
       uiOutput("header_monitoring_all"),
       card(plotOutput("plot_monitoring_all", height = "900px"))
+    )
+  ),
+
+  nav_panel("🐭 EPIC",
+    layout_sidebar(
+      sidebar = sidebar(width = 260,
+        sliderInput("epic_avg_window", "Averaging window (months)",
+                    min = 3, max = 24, value = 12, step = 1),
+        helpText("EPIC charges booked in the Einzelposten, stacked by PSP. ",
+                 "Bills usually arrive quarterly; the line smooths them into a ",
+                 "trailing monthly average. Set the forecast's EPIC CHF/month ",
+                 "from the line's current level — or higher if you expect it to grow.")
+      ),
+      card(plotOutput("plot_epic", height = "600px"))
     )
   ),
 
@@ -1303,7 +1468,7 @@ ui <- page_navbar(
                     min = 2, max = 12, value = 6, step = 1),
         sliderInput("inflation_psp", "Inflation on spending (% / year)",
                     min = 0, max = 3, value = 0, step = 0.25),
-        uiOutput("ui_consumables_info_psp"),
+        uiOutput("ui_cost_controls_psp"),
         hr(),
         strong("Personnel — toggle to include/exclude"),
         uiOutput("ui_person_toggles_psp"),
@@ -1322,8 +1487,8 @@ ui <- page_navbar(
                     min = 2, max = 12, value = 6, step = 1),
         sliderInput("inflation", "Inflation on spending (% / year)",
                     min = 0, max = 3, value = 0, step = 0.25),
-        helpText("Salary from Salaryplan.xlsx; consumables scaled by FTE from past window."),
-        uiOutput("ui_consumables_info"),
+        helpText("Salary from Salaryplan.xlsx; consumables scaled by FTE of toggled-on people; EPIC as flat background cost."),
+        uiOutput("ui_cost_controls"),
         hr(),
         strong("Personnel — toggle to include/exclude"),
         uiOutput("ui_person_toggles"),
@@ -1390,11 +1555,20 @@ server <- function(input, output, session) {
         p(strong("Will load: "), tags$code(ep)))
   })
 
+  notify_health <- function() {
+    h <- rv$data$health
+    if (!is.null(h) && length(h) > 0)
+      showNotification(paste0("⚠️ ", length(h),
+        " data notice(s) — details on the Load Data tab."),
+        type = "warning", duration = 8)
+  }
+
   reload_data <- function() {
     req(rv$ep_path)
     withProgress(message = "Reloading data...", {
       tryCatch({
         rv$data <- load_all_data(rv$ep_path)
+        notify_health()
       }, error = function(e) {
         showNotification(paste("❌ Reload error:", e$message), type = "error", duration = 10)
       })
@@ -1418,6 +1592,7 @@ server <- function(input, output, session) {
           paste0("✅ Loaded. Reference date: ",
                  format(rv$data$reference_date, "%d.%m.%Y")),
           type = "message", duration = 5)
+        notify_health()
       }, error = function(e) {
         showNotification(paste("❌ Error:", e$message), type = "error", duration = 10)
       })
@@ -1438,6 +1613,17 @@ server <- function(input, output, session) {
           p("Data folder: ", tags$code(d$raw_dir))
       )
     )
+  })
+
+  output$ui_data_health <- renderUI({
+    req(rv$data)
+    h <- rv$data$health
+    if (is.null(h) || length(h) == 0)
+      return(div(class = "alert alert-success mt-2",
+                 "✅ Data health: no dropped rows, all IDs cross-match."))
+    div(class = "alert alert-warning mt-2",
+        p(strong(paste0("⚠️ Data health — ", length(h), " notice(s):"))),
+        tags$ul(lapply(h, tags$li)))
   })
 
   output$ui_psp_select <- renderUI({
@@ -2140,6 +2326,14 @@ Data up to: ",
     } else print(p)
   })
 
+  output$plot_epic <- renderPlot({
+    req(rv$data)
+    p <- make_epic_plot(rv$data, avg_window = input$epic_avg_window %||% 12)
+    if (is.null(p)) {
+      plot.new(); text(0.5, 0.5, "No EPIC bookings in the Einzelposten", cex = 1.4, col = "grey50")
+    } else print(p)
+  })
+
   # person list buttons in sidebar
   output$ui_person_list <- renderUI({
     sp <- rv_sal$plan
@@ -2540,31 +2734,62 @@ Data up to: ",
     })
   })
 
-  consumables_info <- function(burn_window_months, psp_id = NULL) {
-    req(rv$data)
+  # ── Consumables & EPIC controls ───────────────────────────────────────────
+  # Suggested values come from the SAME helpers the forecast falls back to, and
+  # the box value (suggested or hand-edited) is passed verbatim into the plot
+  # functions — so the sidebar numbers and the forecast math can never diverge.
+  # Suggestions recompute (and reset any manual override) when the burn window
+  # or the data changes.
+  cost_controls_ui <- function(suffix, burn_window_months, psp_id = NULL) {
     d <- rv$data
-    d$salary_plan_full <- rv_sal$plan   # show the rate for the full team
-    # Same helper the forecast uses → the displayed number IS the forecast input.
-    per_fte_yr <- consumables_per_fte_month(d, burn_window_months, psp_id)$per_fte_month * 12
+    d$salary_plan_full <- rv_sal$plan   # calibrate FTE on the full team
+    rate_yr <- round(consumables_per_fte_month(d, burn_window_months)$per_fte_month * 12)
+    epic_m  <- round(epic_monthly_avg(d, burn_window_months, psp_id))
     div(
       hr(),
-      strong("Consumables estimate"),
-      p(style="margin:2px 0;font-size:0.85em;color:#555;",
-        paste0("CHF ", format(round(per_fte_yr / 1000), big.mark="'"), "k / FTE / year")),
-      p(style="margin:2px 0;font-size:0.75em;color:#888;",
-        paste0("(based on last ", burn_window_months, " months non-salary spend)"))
+      strong("Consumables"),
+      checkboxInput(paste0("consum_on", suffix), "Include consumables",
+                    value = isolate(input[[paste0("consum_on", suffix)]]) %||% TRUE),
+      numericInput(paste0("consum_rate", suffix), "CHF / FTE / year",
+                   value = rate_yr, min = 0, step = 500),
+      p(style="margin:-6px 0 6px;font-size:0.75em;color:#888;",
+        paste0("Suggested ", format(rate_yr, big.mark="'"),
+               " — all grants, last ", burn_window_months,
+               "m, excl. Salary & EPIC. Applied × FTE of people toggled on.")),
+      strong("EPIC (background cost)"),
+      checkboxInput(paste0("epic_on", suffix), "Include EPIC",
+                    value = isolate(input[[paste0("epic_on", suffix)]]) %||% TRUE),
+      numericInput(paste0("epic_amt", suffix), "CHF / month",
+                   value = epic_m, min = 0, step = 100),
+      p(style="margin:-6px 0 0;font-size:0.75em;color:#888;",
+        paste0("Suggested ", format(epic_m, big.mark="'"), " — ",
+               if (is.null(psp_id)) "all PSPs" else "this PSP",
+               ", last ", burn_window_months, "m avg. Flat per month, independent of FTE."))
     )
   }
 
-  output$ui_consumables_info <- renderUI({
+  output$ui_cost_controls <- renderUI({
     req(rv$data)
-    consumables_info(input$burn_window)
+    cost_controls_ui("_tot", input$burn_window)
   })
 
-  output$ui_consumables_info_psp <- renderUI({
+  output$ui_cost_controls_psp <- renderUI({
     req(rv$data, input$psp_id_fc)
-    consumables_info(input$burn_window_psp, psp_id = input$psp_id_fc)
+    cost_controls_ui("_psp", input$burn_window_psp, psp_id = input$psp_id_fc)
   })
+
+  # Effective values handed to the plots: 0 when toggled off, box value when
+  # set, NULL (= auto, identical to the suggestion) before the UI first renders.
+  effective_consum_rate_month <- function(suffix) {
+    if (!isTRUE(input[[paste0("consum_on", suffix)]] %||% TRUE)) return(0)
+    v <- suppressWarnings(as.numeric(input[[paste0("consum_rate", suffix)]]))
+    if (length(v) == 0 || is.na(v)) NULL else v / 12
+  }
+  effective_epic_monthly <- function(suffix) {
+    if (!isTRUE(input[[paste0("epic_on", suffix)]] %||% TRUE)) return(0)
+    v <- suppressWarnings(as.numeric(input[[paste0("epic_amt", suffix)]]))
+    if (length(v) == 0 || is.na(v)) NULL else v
+  }
 
   # ── Person toggles (checkbox based — reliable re-render) ─────────────────
   make_person_choices <- function(sp, people) {
@@ -2716,7 +2941,9 @@ Data up to: ",
     d_fc$salary_plan_full <- rv_sal$plan   # unfiltered — calibrates past_fte
     d_fc$investments  <- inv_filtered_psp()
     p <- make_psp_forecast_plot(input$psp_id_fc, d_fc, input$burn_window_psp,
-                                  inflation_rate = input$inflation_psp)
+                                  inflation_rate = input$inflation_psp,
+                                  consumables_rate_month = effective_consum_rate_month("_psp"),
+                                  epic_monthly = effective_epic_monthly("_psp"))
     if (is.null(p)) { plot.new(); text(0.5, 0.5, "No data available", cex = 1.5) } else p
   })
 
@@ -2727,7 +2954,9 @@ Data up to: ",
     d_fc$salary_plan_full <- rv_sal$plan   # unfiltered — calibrates past_fte
     d_fc$investments <- inv_filtered_tot()
     make_forecast_plot(d_fc, burn_window_months = input$burn_window,
-                       inflation_rate = input$inflation)
+                       inflation_rate = input$inflation,
+                       consumables_rate_month = effective_consum_rate_month("_tot"),
+                       epic_monthly = effective_epic_monthly("_tot"))
   })
 }
 
