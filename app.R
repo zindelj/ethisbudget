@@ -1250,36 +1250,71 @@ make_salary_heatmap <- function(d, psp_filter = NULL) {
     person_class <- df |> group_by(name) |> summarise(role_class = classify(amount), .groups = "drop")
   }
 
+  # One box per role (a role change is modelled as a new person, so each
+  # person lives in exactly one box), tiles coloured by PSP so funding-source
+  # switches show along a person's timeline.
   plot_df <- df |>
     left_join(person_class, by = "name") |>
     mutate(
-      role_class = if ("role" %in% names(df)) role else role_class,
-      year = factor(year(month)),
-      mon  = month(month),
-      name = factor(name, levels = rev(sort(unique(name))))
+      role_class = coalesce(role_class, "Other"),
+      psp_lab    = if_else(is.na(psp) | psp == "", "(no PSP)", psp),
+      name       = factor(name, levels = rev(sort(unique(name))))
     )
 
-  all_roles   <- sort(unique(plot_df$role_class))
-  palette     <- c("#4E79A7","#F28E2B","#59A14F","#E15759","#76B7B2","#EDC948","#B07AA1","#FF9DA7","#9C755F","#BAB0AC")
-  role_colors <- setNames(palette[seq_along(all_roles)], all_roles)
+  # Role boxes ordered expensive -> cheap (top -> bottom)
+  role_order <- plot_df |>
+    group_by(role_class) |>
+    summarise(cost = median(amount, na.rm = TRUE), .groups = "drop") |>
+    arrange(desc(cost)) |>
+    pull(role_class)
+  plot_df <- plot_df |> mutate(role_class = factor(role_class, levels = role_order))
 
-  p <- ggplot(plot_df, aes(x = mon, y = name, fill = role_class)) +
+  # Continuous month index so year gridlines and the "now" marker line up
+  y0 <- year(min(plot_df$month))
+  plot_df <- plot_df |> mutate(mx = (year(month) - y0) * 12 + month(month))
+  mon_df <- plot_df |> distinct(mx, month) |> arrange(mx)
+  if (nrow(mon_df) > 36) mon_df <- mon_df |> filter(month(month) %in% c(1, 4, 7, 10))
+  yr_df <- plot_df |>
+    group_by(yr = year(month)) |>
+    summarise(mid = (min(mx) + max(mx)) / 2, .groups = "drop")
+  yr_bounds <- (yr_df$yr[-1] - y0) * 12 + 0.5
+
+  today   <- Sys.Date()
+  today_x <- (year(today) - y0) * 12 + month(today) - 0.5 +
+             (day(today) - 1) / as.numeric(days_in_month(today))
+
+  # PSP colours assigned in fixed order from the FULL plan, not the filtered
+  # subset, so the per-PSP filter never repaints surviving PSPs.
+  # CVD-validated categorical palette (worst adjacent deutan/protan dE >= 21).
+  psp_pal  <- c("#2A78D6","#1BAF7A","#EDA100","#008300","#4A3AA7","#E34948","#E87BA4","#EB6834")
+  all_psps <- sort(unique(sp$psp[!is.na(sp$psp) & sp$psp != ""]))
+  psp_colors <- c(setNames(rep_len(psp_pal, length(all_psps)), all_psps),
+                  "(no PSP)" = "grey70")
+
+  p <- ggplot(plot_df, aes(x = mx, y = name, fill = psp_lab)) +
     geom_tile(color = "white", linewidth = 0.5) +
-    scale_fill_manual(values = role_colors, name = "Role", drop = FALSE) +
-    scale_x_continuous(breaks = 1:12, labels = 1:12, expand = c(0, 0)) +
-    facet_grid(. ~ year, switch = "x") +
+    geom_vline(xintercept = yr_bounds, color = "grey40", linewidth = 0.35) +
+    scale_fill_manual(values = psp_colors, name = "PSP",
+                      breaks = names(psp_colors)[names(psp_colors) %in% plot_df$psp_lab]) +
+    scale_x_continuous(breaks = mon_df$mx, labels = month(mon_df$month),
+                       expand = expansion(add = 0.5),
+                       sec.axis = dup_axis(breaks = yr_df$mid, labels = yr_df$yr)) +
+    facet_grid(role_class ~ ., scales = "free_y", space = "free_y") +
     labs(title = if (!is.null(psp_filter)) paste("Salary Plan -", psp_filter) else "Salary Plan - All PSPs",
          x = NULL, y = NULL) +
     theme_minimal(base_size = 11) +
     theme(
-      axis.text.x     = element_text(size = 7),
-      axis.text.y     = element_text(size = 9),
-      panel.grid      = element_blank(),
-      strip.placement = "outside",
-      strip.text      = element_text(size = 9, face = "bold"),
-      panel.spacing.x = unit(2, "pt"),
-      legend.position = "bottom"
+      axis.text.x      = element_text(size = 7),
+      axis.text.x.top  = element_text(size = 9, face = "bold"),
+      axis.text.y      = element_text(size = 9),
+      panel.grid       = element_blank(),
+      panel.border     = element_rect(color = "grey75", fill = NA, linewidth = 0.4),
+      panel.spacing.y  = unit(8, "pt"),
+      strip.text.y     = element_text(size = 9, face = "bold", angle = 0),
+      legend.position  = "bottom"
     )
+  if (today_x >= min(plot_df$mx) - 0.5 && today_x <= max(plot_df$mx) + 0.5)
+    p <- p + geom_vline(xintercept = today_x, color = "firebrick", linewidth = 0.9)
   p
 }
 
