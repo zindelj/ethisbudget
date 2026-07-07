@@ -16,6 +16,8 @@ if not defined RSCRIPT (
 )
 
 echo Starting ethisbudget with "%RSCRIPT%" ...
+echo (first run on a new machine may pause here to install R packages)
+"%RSCRIPT%" -e "if (!requireNamespace('shiny', quietly = TRUE)) { message('Restoring R packages - one-time setup, this can take a while...'); renv::restore(prompt = FALSE) }"
 echo The app opens in your browser shortly. Keep this window open while working;
 echo close it (or press Ctrl+C) to stop the app.
 "%RSCRIPT%" -e "shiny::runApp('app.R', port = 4242, launch.browser = TRUE)"
