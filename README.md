@@ -8,6 +8,10 @@ A Shiny app for monitoring and forecasting lab finances across PSP accounts.
 
 The app code (`app.R`, `renv/`, etc.) lives in this repository. **Your budget data lives in a separate folder of your choice** — anywhere on your machine, outside this repo. You pick that folder each time you start the app.
 
+### Installing on a new machine
+
+Copy **`Install ethisbudget.bat`** to the machine and double-click it: it installs R if needed, downloads the latest app version from GitHub into `Documents\ethisbudget`, and creates a desktop shortcut. Re-run the same file any time to update. (Budget data is never touched — share the data folder separately.)
+
 ### The only file you need to provide
 
 Place an SAP export named **`export_YYYYMMDD_HHMMSS.xlsx`** (e.g. `export_20260506_082836.xlsx`) into your data folder. Everything else is created automatically on first load. If multiple `export_*.xlsx` files are present, the app loads the most recent one (by filename timestamp).
