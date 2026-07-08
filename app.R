@@ -1597,6 +1597,14 @@ ui <- page_navbar(
   nav_panel("📁 Load Data",
     card(
       card_header("Select data folder"),
+      # App-version stamp: the desktop shortcut runs a COPY of the app in
+      # Documents\ethisbudget that only updates when the installer is re-run.
+      # Showing when this app.R was last modified makes a stale copy obvious.
+      helpText(style = "color:#888;",
+               paste0("App version (app.R last modified): ",
+                      format(file.mtime("app.R"), "%Y-%m-%d %H:%M"),
+                      " — if this is older than expected, re-run ",
+                      "'Install ethisbudget.bat' to update.")),
       helpText("Pick the folder that contains the Einzelpostenbericht (export_YYYYMMDD_HHMMSS.xlsx). ",
                "All other files (Konten, Zahlungsplan, Salaryplan, Investments, Lohntabelle) are read from — and written to — the same folder."),
       shinyDirButton("data_dir_btn", "Browse folder…", "Select data folder", class = "btn-outline-primary"),
