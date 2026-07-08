@@ -637,6 +637,22 @@ load_all_data <- function(ep_path) {
         "but in no per-PSP forecast. Check the ID."))
   }
 
+  # EP bookings on an account that matches no konto: they count in the
+  # lab-wide totals but in NO per-PSP view/header — usually a variant ID form
+  # in the export (leading zeros, suffix) that canonical_id doesn't map.
+  ep_unmatched <- setdiff(ep_ids, c(konten$id, typless_ids))
+  if (length(ep_unmatched) > 0) {
+    unm <- ist_raw |> filter(id %in% ep_unmatched) |>
+      group_by(id) |>
+      summarise(net = sum(actual_spending - actual_income, na.rm = TRUE),
+                n = n(), .groups = "drop")
+    health <- c(health, paste0("Einzelposten: ", unm$n, " booking(s) on '",
+      unm$id, "' (net ", format(round(unm$net), big.mark = "'"),
+      " CHF) match no konto in Konten.xlsx — they count in the lab-wide ",
+      "totals but in NO per-PSP monitoring, forecast or header. If this ",
+      "should be an existing konto, the ID form in the export differs."))
+  }
+
   no_bookings <- setdiff(konten$id, unique(ist_monthly$id))
   if (length(no_bookings) > 0)
     health <- c(health, paste0("Konto '", no_bookings,
