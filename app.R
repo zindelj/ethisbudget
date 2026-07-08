@@ -274,8 +274,12 @@ CATEGORY_RULES <- tibble::tribble(
   "Schenkungen",             NA,                           "Internal charges",
   "Personalrekrutierung",    NA,                           "Internal charges",
 
+  # Year-end transfer Kostenstelle → Forschungsreserve: money moved between
+  # own pots, not spent — kept out of the consumables-per-FTE calibration
+  # (see consumables_per_fte_month).
+  "Reserve Jahresabr",       NA,                           "Transfer Forschungsreserve",
+
   # Other
-  "Reserve Jahresabr",       NA,                           "Other",
   "mehrere",                 NA,                           "Other"
 )
 
@@ -314,13 +318,14 @@ CATEGORY_COLORS <- c(
   "ScopeM"                    = "#4DBBD5",  # NPG cyan
   "Facility costs"            = "#5F9EA0",  # cadet blue (residual)
   "Internal charges"          = "#828282",  # gray
+  "Transfer Forschungsreserve"= "#2F4F4F",  # dark slate (money moved, not spent)
   "Other"                     = "#B4AA96"   # tan
 )
 
 CATEGORY_ORDER <- c("Salary","Consumables","Taconic","Animal purchase","Equipment",
                     "IT, Office & Publications","Travel, Events & Training",
                     "FACS","EPIC","ScopeM","Facility costs",
-                    "Internal charges","Other")
+                    "Internal charges","Transfer Forschungsreserve","Other")
 
 # ================================================================
 # Load all static data from dirname(ep_path)
@@ -694,7 +699,9 @@ make_psp_plot <- function(psp_id, d) {
 # Historical non-salary, non-EPIC spend per FTE per month, calibrated GLOBALLY
 # (all grants, Startup excluded) over the burn window. EPIC (animal facility)
 # is excluded because it is a background cost largely independent of FTE — it
-# gets its own forecast line (see epic_monthly_avg). This rate is what the
+# gets its own forecast line (see epic_monthly_avg). "Transfer Forschungs-
+# reserve" (year-end Kostenstelle→Reserve transfer) is excluded because it is
+# money moved between own pots, not consumed. This rate is what the
 # sidebar suggests as CHF/FTE/year; the sidebar value (suggested or manually
 # overridden) is exactly what the forecast multiplies future FTE by.
 #
@@ -711,7 +718,8 @@ consumables_per_fte_month <- function(d, burn_window_months) {
   win_start <- today_month %m-% months(burn_window_months)
   nonsalary_total <- tryCatch(
     ist_f |> filter(month > win_start, month <= today_month,
-                    actual_spending > 0, !category %in% c("Salary", "EPIC")) |>
+                    actual_spending > 0,
+                    !category %in% c("Salary", "EPIC", "Transfer Forschungsreserve")) |>
       summarise(s = sum(actual_spending, na.rm = TRUE)) |> pull(s),
     error = function(e) 0
   )
@@ -965,9 +973,27 @@ make_forecast_plot <- function(d, burn_window_months = 6,
 
   end_balance   <- last(ts_future$balance)
   end_month     <- last(ts_future$month)
+  # Startup is excluded from the forecast, but its remaining saldo (planned
+  # income minus spending to date — same convention as the Monitoring header)
+  # is still spendable money, so show the end balance including it as well.
+  startup_saldo <- if (length(startup_ids) > 0) {
+    startup_income <- planned_income_m |>
+      filter(id %in% startup_ids, month <= today_month) |>
+      summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+    startup_spent  <- ist_monthly |>
+      filter(id %in% startup_ids, month <= today_month) |>
+      summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
+    startup_income - startup_spent
+  } else 0
+  end_incl_startup <- end_balance + startup_saldo
   end_label     <- paste0(if (end_balance >= 0) "Expected: +" else "Expected: ",
                           format(round(end_balance), big.mark = "'"),
-                          " CHF\nat end of horizon (", format(end_month, "%b %Y"), ")")
+                          " CHF\nat end of horizon (", format(end_month, "%b %Y"), ")",
+                          if (length(startup_ids) > 0) paste0(
+                            "\nincl. Startup saldo: ",
+                            if (end_incl_startup >= 0) "+" else "",
+                            format(round(end_incl_startup), big.mark = "'"), " CHF")
+                          else "")
   end_label_df  <- tibble(month = end_month, value = end_balance,
                            label = end_label,
                            panel = factor("Balance", levels = c("Cashflow","Balance")))

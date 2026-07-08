@@ -92,3 +92,36 @@ p3 <- make_psp_forecast_plot("G1", d, 6, consumables_rate_month = 1200, epic_mon
 ok("PSP forecast for booking-less grant builds", !is.null(p3))
 invisible(ggplot_build(p3))
 ok("PSP forecast renders", TRUE)
+
+# 7. year-end transfer to the Forschungsreserve is money moved, not consumed:
+#    it must not inflate the consumables-per-FTE calibration.
+d3 <- d
+d3$ist_raw <- bind_rows(d3$ist_raw,
+  tibble(id = "K1", month = as_date("2026-06-01"),
+         category = "Transfer Forschungsreserve",
+         actual_spending = 50000, actual_income = 0))
+r3 <- consumables_per_fte_month(d3, 6)
+ok("Reserve transfer excluded from consumables rate", abs(r3$per_fte_month - r$per_fte_month) < 1e-6)
+
+# 8. end-of-horizon label: with a Startup account, a second line shows the
+#    balance incl. the Startup saldo (planned income - spending to date).
+lab_of <- function(p) {
+  labs <- unlist(lapply(ggplot_build(p)$data,
+                        function(df) if ("label" %in% names(df)) as.character(df$label) else NULL))
+  labs[grepl("Expected", labs)][1]
+}
+num_in <- function(s) as.numeric(gsub("'", "", regmatches(s, regexpr("[+-]?[0-9']+", s))))
+d4 <- d
+d4$konten <- bind_rows(d4$konten,
+  tibble(id = "S1", bezeichnung = "Startup", typ = "Startup", laufzeit_date = as_date(NA)))
+d4$planned_income_m <- bind_rows(d4$planned_income_m,
+  tibble(id = "S1", month = as_date("2026-01-01"), planned_income = 80000))
+d4$ist_monthly <- bind_rows(d4$ist_monthly,
+  tibble(id = "S1", month = as_date("2026-03-01"), actual_income = 0, actual_spending = 30000))
+p4 <- make_forecast_plot(d4, 6, inflation_rate = 0, consumables_rate_month = 1200, epic_monthly = 1500)
+lab1 <- lab_of(p1); lab4 <- lab_of(p4)
+ok("no Startup account = no Startup line in label", !grepl("Startup", lab1))
+ok("Startup account adds incl.-Startup line",       grepl("incl. Startup saldo", lab4))
+line_incl <- strsplit(lab4, "\n")[[1]] |> (\(x) x[grepl("Startup", x)])()
+ok("incl.-Startup = expected + saldo (80000-30000)",
+   abs(num_in(line_incl) - (num_in(lab1) + 50000)) < 1)
