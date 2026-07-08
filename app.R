@@ -342,8 +342,18 @@ CATEGORY_ORDER <- c("Salary","Consumables","Taconic","Animal purchase","Equipmen
 # some other negative Kurztext (candidates seen in real data: Schenkungen,
 # Kostenübernahme — treated as Gutschriften until proven otherwise).
 INCOME_KURZTEXT_PATTERN <- "^Entgelte|^Reserve Jahresabr$"
-is_income_row <- function(kurztext) {
-  !is.na(kurztext) & str_detect(str_squish(kurztext), INCOME_KURZTEXT_PATTERN)
+# Sign-dependent Kurztexte: non-SNF funders book their tranches under these
+# (foundation "Kostenübernahme", donation "Schenkungen", industry
+# "Wirtschaftsor. Fors."), so a NEGATIVE amount is income — but a POSITIVE
+# amount on the same Kurztext is a real internal charge and stays spending.
+SIGN_INCOME_KURZTEXT_PATTERN <- "^Kostenübernahme|^Schenkungen|^Wirtschaftsor"
+is_income_row <- function(kurztext, betrag = NULL) {
+  kt  <- str_squish(kurztext)
+  inc <- !is.na(kt) & str_detect(kt, INCOME_KURZTEXT_PATTERN)
+  if (!is.null(betrag))
+    inc <- inc | (!is.na(kt) & str_detect(kt, SIGN_INCOME_KURZTEXT_PATTERN) &
+                    !is.na(betrag) & betrag < 0)
+  inc
 }
 
 # ================================================================
@@ -456,7 +466,7 @@ load_all_data <- function(ep_path) {
       # EVERYTHING else keeps its sign in actual_spending, so Gutschriften
       # net the IST exactly like SAP's Ist column. A positive amount on an
       # income Kurztext (e.g. repayment to SNF) becomes negative income.
-      is_inc          = is_income_row(kurztext),
+      is_inc          = is_income_row(kurztext, betrag_in_bw),
       actual_income   = if_else(is_inc, -betrag_in_bw, 0),
       actual_spending = if_else(is_inc, 0, betrag_in_bw),
       category        = classify_category(kurztext, buchungstext)
@@ -1958,6 +1968,20 @@ server <- function(input, output, session) {
     ist_total <- d$ist_monthly |>
       filter(id == psp_id, !!yr_filter_ist) |>
       summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
+    # SAP's Kostenstellenbericht rolls attached Erlöse PSP elements (e.g.
+    # '5-029870' under KST 29870) into the parent's Ist — include their net
+    # here too so the header is directly comparable with SAP.
+    if (is_kost) {
+      erloes_attached <- konten |>
+        filter(tolower(typ) == "erlöse",
+               str_replace(id, "^\\d-0*", "") == psp_id) |> pull(id)
+      if (length(erloes_attached) > 0) {
+        ist_total <- ist_total + (d$ist_monthly |>
+          filter(id %in% erloes_attached, !!yr_filter_ist) |>
+          summarise(v = sum(actual_spending - actual_income, na.rm = TRUE)) |>
+          pull(v))
+      }
+    }
 
     pct_spent <- if (budget_total > 0) round(100 * ist_total / budget_total, 1) else NA_real_
 

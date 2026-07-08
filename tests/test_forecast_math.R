@@ -6,7 +6,8 @@ suppressMessages({
 # Evaluate only whitelisted top-level function definitions from app.R
 exprs <- parse("app.R")
 want  <- c("%||%", "safe_max_date", "canonical_id", "mirror_reserve_transfers",
-           "resolve_ep_id_aliases", "INCOME_KURZTEXT_PATTERN", "is_income_row",
+           "resolve_ep_id_aliases", "INCOME_KURZTEXT_PATTERN",
+           "SIGN_INCOME_KURZTEXT_PATTERN", "is_income_row",
            "consumables_per_fte_month", "epic_monthly_avg", "compute_salary_cost",
            "interpolate_balance", "make_forecast_plot", "make_psp_forecast_plot")
 for (e in exprs) {
@@ -192,6 +193,13 @@ ok("Entgelte SNF = income",        is_income_row("Entgelte SNF"))
 ok("Reserve Jahresabr = income",   is_income_row("Reserve Jahresabr"))
 ok("Lohnaufwand credit = Gutschrift, not income", !is_income_row("Lohnaufwand"))
 ok("NA kurztext = not income",     !is_income_row(NA_character_))
+# sign-dependent Kurztexte: non-SNF tranches (negative) vs internal charges
+ok("Kostenübernahme negative = income (non-SNF tranche)",
+   is_income_row("Kostenübernahme", -50000))
+ok("Kostenübernahme positive = spending",  !is_income_row("Kostenübernahme", 120))
+ok("Schenkungen negative = income",         is_income_row("Schenkungen", -80000))
+ok("Wirtschaftsor. Fors. negative = income", is_income_row("Wirtschaftsor. Fors.", -60000))
+ok("Lohnaufwand negative stays Gutschrift", !is_income_row("Lohnaufwand", -20967))
 
 # 13. Gutschriften (negative actual_spending) net the consumables rate:
 #     6x2000 consumables minus a 1000 credit -> 11000/(6*1.5)
