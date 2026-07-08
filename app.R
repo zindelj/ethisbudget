@@ -685,17 +685,22 @@ load_all_data <- function(ep_path) {
       "should be an existing konto, the ID form in the export differs."))
   }
 
-  # A konto that is the PSP-element form of another konto (e.g. '5-029870'
-  # next to '29870') splits one real account's bookings across two kontos —
-  # the alias remap skips known kontos, so this must be flagged to the user.
+  # A konto in PSP-element form of another konto (e.g. '5-029870' next to
+  # '29870') is either a legitimate separate account (typically the Erlöse
+  # revenue element — kept separate on purpose) or an accidental duplicate
+  # splitting one account's bookings. Erlöse is expected; flag the rest.
+  # Note for SAP comparisons either way: the SAP Kostenstellenbericht rolls
+  # such elements INTO the parent account's Ist, the app keeps them separate.
   stripped_ids <- str_replace(konten$id, "^\\d-0*", "")
-  looks_alias  <- konten$id[stripped_ids != konten$id & stripped_ids %in% konten$id]
-  if (length(looks_alias) > 0)
-    health <- c(health, paste0("Konto '", looks_alias,
-      "' looks like the PSP-element form of konto '",
-      str_replace(looks_alias, "^\\d-0*", ""), "'. If it is the SAME account, ",
-      "delete the '", looks_alias, "' row in Konten — its bookings are ",
-      "currently counted as a separate konto instead of merging."))
+  looks_alias  <- konten |>
+    mutate(stripped = stripped_ids) |>
+    filter(stripped != id, stripped %in% konten$id, tolower(typ) != "erlöse")
+  if (nrow(looks_alias) > 0)
+    health <- c(health, paste0("Konto '", looks_alias$id,
+      "' looks like the PSP-element form of konto '", looks_alias$stripped,
+      "'. If it is the SAME account, delete the '", looks_alias$id,
+      "' row in Konten — its bookings are currently counted as a separate ",
+      "konto instead of merging."))
 
   no_bookings <- setdiff(konten$id, unique(ist_monthly$id))
   if (length(no_bookings) > 0)
