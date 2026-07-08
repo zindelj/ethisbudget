@@ -677,7 +677,10 @@ make_psp_plot <- function(psp_id, d) {
       expected_balance = cumsum(planned_income - expected_burn),
       year = year(month),
       actual_balance = case_when(
-        psp_id %in% kostenstelle_ids ~ ave(planned_income, year, FUN = cumsum) -
+        # Kostenstelle: EP credits (negative bookings) are real income on top
+        # of the ZP budget — SAP includes them in the year-end sweep, so the
+        # balance must too, or December ends below zero by exactly that amount.
+        psp_id %in% kostenstelle_ids ~ ave(planned_income + actual_income, year, FUN = cumsum) -
                                        ave(actual_spending, year, FUN = cumsum),
         psp_id %in% startup_ids      ~ cumsum(planned_income - actual_spending),
         TRUE                         ~ cumsum(actual_income  - actual_spending)
@@ -908,12 +911,13 @@ make_forecast_plot <- function(d, burn_window_months = 6,
   today_month <- last_ist_month
   if (is.na(today_month)) return(NULL)
 
-  # Past income: EP for grants AND Reserve (SAP books the year-end transfer as
-  # actual income on the Reserve — see mirror_reserve_transfers), ZP for
-  # Kostenstelle. Reserve ZP entries are ignored here so a manually typed
-  # transfer cannot double-count on top of the EP booking.
+  # Past income: EP actual income for ALL accounts — grants, the Reserve
+  # (year-end transfer, see mirror_reserve_transfers), and Kostenstelle
+  # credits/refunds (the annual budget itself never appears as an EP income
+  # row, so no double count) — plus the ZP budget for the Kostenstelle.
+  # Reserve ZP entries are ignored so a manually typed transfer cannot
+  # double-count on top of the EP booking.
   past_income_ist <- ist_ns |>
-    filter(!id %in% kostenstelle_ids) |>
     group_by(month) |>
     summarise(income_ist = sum(actual_income, na.rm = TRUE), .groups = "drop")
 
@@ -1151,6 +1155,16 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
   if (planned_funded) {
     past_income <- planned_income_m |> filter(id == psp_id, month <= today_month) |>
       rename(total_income = planned_income)
+    # Kostenstelle: EP credits (negative bookings) are real income on top of
+    # the ZP budget — count them, same as everywhere else.
+    if (psp_id %in% kostenstelle_ids) {
+      past_income <- bind_rows(
+        past_income,
+        ist_psp |> filter(month <= today_month, actual_income > 0) |>
+          select(month, total_income = actual_income)) |>
+        group_by(month) |>
+        summarise(total_income = sum(total_income, na.rm = TRUE), .groups = "drop")
+    }
   } else {
     past_income <- ist_psp |> filter(month <= today_month) |>
       select(month, total_income = actual_income)
@@ -1844,6 +1858,10 @@ server <- function(input, output, session) {
       income_so_far <- d$planned_income_m |>
         filter(id == psp_id, year(month) == cur_year) |>
         summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+      # plus EP credits (negative bookings) — SAP sweeps them at year end
+      income_so_far <- income_so_far + d$ist_monthly |>
+        filter(id == psp_id, year(month) == cur_year, month <= today_month) |>
+        summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
     } else if (psp_id %in% startup_ids) {
       income_so_far <- d$planned_income_m |>
         filter(id == psp_id, month <= today_month) |>
@@ -1912,14 +1930,18 @@ server <- function(input, output, session) {
 
     pct_spent <- if (budget_total > 0) round(100 * ist_total / budget_total, 1) else NA_real_
 
-    # Balance: Kostenstelle current year; Startup planned; others actual income
+    # Balance: Kostenstelle current year (ZP budget + EP credits); Startup
+    # planned; others actual income
     income_kost <- d$planned_income_m |>
       filter(id %in% kostenstelle_ids, year(month) == cur_year) |>
       summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+    income_kost_credits <- d$ist_monthly |>
+      filter(id %in% kostenstelle_ids, year(month) == cur_year, month <= today_month) |>
+      summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
     income_actual <- d$ist_monthly |>
       filter(!id %in% c(kostenstelle_ids, exclude_all), month <= today_month) |>
       summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
-    balance <- (income_kost + income_actual) - ist_total
+    balance <- (income_kost + income_kost_credits + income_actual) - ist_total
 
     # FTE in current month across all PSPs
     fte_now <- NA_real_

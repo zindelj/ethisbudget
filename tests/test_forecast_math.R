@@ -155,3 +155,19 @@ ok("transfer stays out of avg burn (subtitle unchanged)",
 mir2 <- mirror_reserve_transfers(mir$ist_raw, d5$konten)
 ok("existing expenditure side blocks re-mirroring",
    nrow(mir2$ist_raw) == nrow(mir$ist_raw) && grepl("no synthetic", mir2$notes))
+
+# 10. Kostenstelle EP credits (negative bookings = actual income) are real
+#     money on top of the ZP budget — they must raise the total forecast
+#     balance by exactly their amount.
+d6 <- d
+d6$ist_raw <- bind_rows(d6$ist_raw,
+  tibble(id = "K1", month = as_date("2026-02-01"), category = "Other",
+         actual_spending = 0, actual_income = 5000))
+d6$ist_monthly <- d6$ist_raw |> group_by(id, month) |>
+  summarise(actual_income = sum(actual_income), actual_spending = sum(actual_spending), .groups = "drop")
+p6 <- make_forecast_plot(d6, 6, inflation_rate = 0, consumables_rate_month = 1200, epic_monthly = 1500)
+ok("Kostenstelle credit raises total forecast by 5000",
+   abs(num_in(lab_of(p6)) - (num_in(lab1) + 5000)) < 1)
+p7 <- make_psp_forecast_plot("K1", d6, 6, consumables_rate_month = 1200, epic_monthly = 0)
+ok("per-PSP forecast with credit builds", !is.null(p7))
+invisible(ggplot_build(p7))
