@@ -6,7 +6,7 @@ suppressMessages({
 # Evaluate only whitelisted top-level function definitions from app.R
 exprs <- parse("app.R")
 want  <- c("%||%", "safe_max_date", "canonical_id", "mirror_reserve_transfers",
-           "resolve_ep_id_aliases",
+           "resolve_ep_id_aliases", "INCOME_KURZTEXT_PATTERN", "is_income_row",
            "consumables_per_fte_month", "epic_monthly_avg", "compute_salary_cost",
            "interpolate_balance", "make_forecast_plot", "make_psp_forecast_plot")
 for (e in exprs) {
@@ -185,3 +185,19 @@ ok("PSP-element id remapped to konto",
    grepl("read as konto '29870'", al$notes))
 ok("no aliases -> no notes",
    length(resolve_ep_id_aliases(d$ist_raw, d$konten)$notes) == 0)
+
+# 12. income vs Gutschrift: only tranche/transfer Kurztexte are income;
+#     negative cost rows are spending corrections (netted like SAP's Ist).
+ok("Entgelte SNF = income",        is_income_row("Entgelte SNF"))
+ok("Reserve Jahresabr = income",   is_income_row("Reserve Jahresabr"))
+ok("Lohnaufwand credit = Gutschrift, not income", !is_income_row("Lohnaufwand"))
+ok("NA kurztext = not income",     !is_income_row(NA_character_))
+
+# 13. Gutschriften (negative actual_spending) net the consumables rate:
+#     6x2000 consumables minus a 1000 credit -> 11000/(6*1.5)
+d8 <- d
+d8$ist_raw <- bind_rows(d8$ist_raw,
+  tibble(id = "K1", month = as_date("2026-05-01"), category = "Consumables",
+         actual_spending = -1000, actual_income = 0))
+r8 <- consumables_per_fte_month(d8, 6)
+ok("Gutschrift nets consumables rate (11000/9)", abs(r8$per_fte_month - 11000/9) < 1e-6)

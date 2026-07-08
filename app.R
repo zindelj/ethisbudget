@@ -331,6 +331,22 @@ CATEGORY_ORDER <- c("Salary","Consumables","Taconic","Animal purchase","Equipmen
                     "Internal charges","Transfer Forschungsreserve","Other")
 
 # ================================================================
+# Income vs Gutschrift classification
+# ================================================================
+# SAP's Ist is NETTED: a negative amount on a cost Kurztext (salary
+# re-booking, vendor credit, Reisekostenrückerstattung, ...) is a Gutschrift
+# — a spending CORRECTION, not income. Only rows whose Kurztext denotes real
+# money arriving are income: grant tranches ("Entgelte SNF", "Entgelte ...")
+# and the year-end reserve transfer ("Reserve Jahresabr"). Extend the
+# pattern if a konto's head-to-head with SAP is off by exactly the amount of
+# some other negative Kurztext (candidates seen in real data: Schenkungen,
+# Kostenübernahme — treated as Gutschriften until proven otherwise).
+INCOME_KURZTEXT_PATTERN <- "^Entgelte|^Reserve Jahresabr$"
+is_income_row <- function(kurztext) {
+  !is.na(kurztext) & str_detect(str_squish(kurztext), INCOME_KURZTEXT_PATTERN)
+}
+
+# ================================================================
 # EP account aliasing
 # ================================================================
 # SAP sometimes books on the PSP-element form of an account
@@ -372,9 +388,10 @@ mirror_reserve_transfers <- function(ist_raw, konten) {
   transfers <- ist_raw |> filter(category == "Transfer Forschungsreserve")
   incoming  <- transfers |> filter(actual_income > 0)
   if (nrow(incoming) == 0) return(list(ist_raw = ist_raw, notes = notes))
-  # If SAP ever starts booking the expenditure side itself, mirroring would
-  # double it — bail out visibly instead.
-  if (any(transfers$actual_spending > 0)) {
+  # If SAP ever starts booking the expenditure side itself (as positive
+  # spending, or as a positive amount on the income Kurztext = negative
+  # income), mirroring would double it — bail out visibly instead.
+  if (any(transfers$actual_spending > 0 | transfers$actual_income < 0)) {
     return(list(ist_raw = ist_raw, notes = paste0(
       "Reserve transfer: the EP already contains expenditure-side booking(s) ",
       "for 'Reserve Jahresabr' — no synthetic Kostenstelle expenditure added. ",
@@ -435,8 +452,13 @@ load_all_data <- function(ep_path) {
       betrag_in_bw = as.numeric(betrag_in_bw),
       id           = canonical_id(kontierung),
       month        = floor_date(buch_dat, "month"),
-      actual_income   = if_else(betrag_in_bw < 0, -betrag_in_bw, 0),
-      actual_spending = if_else(betrag_in_bw > 0,  betrag_in_bw, 0),
+      # Income rows (tranches, reserve transfer) become actual_income;
+      # EVERYTHING else keeps its sign in actual_spending, so Gutschriften
+      # net the IST exactly like SAP's Ist column. A positive amount on an
+      # income Kurztext (e.g. repayment to SNF) becomes negative income.
+      is_inc          = is_income_row(kurztext),
+      actual_income   = if_else(is_inc, -betrag_in_bw, 0),
+      actual_spending = if_else(is_inc, 0, betrag_in_bw),
       category        = classify_category(kurztext, buchungstext)
     )
 
@@ -860,8 +882,8 @@ consumables_per_fte_month <- function(d, burn_window_months) {
   ist_f <- d$ist_raw |> filter(!id %in% startup_ids)
   win_start <- today_month %m-% months(burn_window_months)
   nonsalary_total <- tryCatch(
+    # net sum: Gutschriften (negative actual_spending) reduce the rate
     ist_f |> filter(month > win_start, month <= today_month,
-                    actual_spending > 0,
                     !category %in% c("Salary", "EPIC", "Transfer Forschungsreserve")) |>
       summarise(s = sum(actual_spending, na.rm = TRUE)) |> pull(s),
     error = function(e) 0
@@ -898,7 +920,8 @@ epic_monthly_avg <- function(d, burn_window_months, psp_id = NULL) {
   ist_f <- d$ist_raw |> filter(category == "EPIC")
   if (!is.null(psp_id)) ist_f <- ist_f |> filter(id == psp_id)
   tot <- tryCatch(
-    ist_f |> filter(month > win_start, month <= today_month, actual_spending > 0) |>
+    # net sum: EPIC credits (negative actual_spending) reduce the average
+    ist_f |> filter(month > win_start, month <= today_month) |>
       summarise(s = sum(actual_spending, na.rm = TRUE)) |> pull(s),
     error = function(e) 0
   )
@@ -1929,24 +1952,19 @@ server <- function(input, output, session) {
         summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
     }
 
-    # IST = spending (current year for Kostenstelle, all to reference date otherwise)
+    # IST = spending (current year for Kostenstelle, all to reference date
+    # otherwise). Already NET — Gutschriften are negative actual_spending at
+    # ingestion — so this reads identically to SAP's Ist column.
     ist_total <- d$ist_monthly |>
       filter(id == psp_id, !!yr_filter_ist) |>
       summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
-    # Kostenstelle: net the EP credits (negative bookings) into IST so the
-    # number reads identically to SAP's Kostenstellenbericht "Ist" column.
-    if (is_kost) {
-      ist_total <- ist_total - (d$ist_monthly |>
-        filter(id == psp_id, !!yr_filter_ist) |>
-        summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v))
-    }
 
     pct_spent <- if (budget_total > 0) round(100 * ist_total / budget_total, 1) else NA_real_
 
     # Balance = income - spending (scoped same as above)
     if (is_kost) {
-      # credits are already netted into IST above — income here is ZP only,
-      # so Balance == Budget-IST for the Kostenstelle, exactly like SAP
+      # Gutschriften are negative spending (already net in IST) — income here
+      # is ZP only, so Balance == Budget-IST for the Kostenstelle, like SAP
       income_so_far <- d$planned_income_m |>
         filter(id == psp_id, year(month) == cur_year) |>
         summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
@@ -2007,11 +2025,11 @@ server <- function(input, output, session) {
       summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
     budget_total <- budget_total_kost + budget_total_other + budget_total_nozp
 
-    # IST: Kostenstelle = current year only, netted (spending - credits) to
-    # match SAP's Kostenstellenbericht; others = up to reference date
+    # IST: Kostenstelle = current year only; others = up to reference date.
+    # Already net (Gutschriften are negative spending at ingestion).
     ist_kost <- d$ist_monthly |>
       filter(id %in% kostenstelle_ids, year(month) == cur_year) |>
-      summarise(v = sum(actual_spending - actual_income, na.rm = TRUE)) |> pull(v)
+      summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
     ist_other <- d$ist_monthly |>
       filter(!id %in% c(kostenstelle_ids, exclude_all), month <= today_month) |>
       summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
