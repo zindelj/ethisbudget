@@ -1850,18 +1850,23 @@ server <- function(input, output, session) {
     ist_total <- d$ist_monthly |>
       filter(id == psp_id, !!yr_filter_ist) |>
       summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
+    # Kostenstelle: net the EP credits (negative bookings) into IST so the
+    # number reads identically to SAP's Kostenstellenbericht "Ist" column.
+    if (is_kost) {
+      ist_total <- ist_total - (d$ist_monthly |>
+        filter(id == psp_id, !!yr_filter_ist) |>
+        summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v))
+    }
 
     pct_spent <- if (budget_total > 0) round(100 * ist_total / budget_total, 1) else NA_real_
 
     # Balance = income - spending (scoped same as above)
     if (is_kost) {
+      # credits are already netted into IST above — income here is ZP only,
+      # so Balance == Budget-IST for the Kostenstelle, exactly like SAP
       income_so_far <- d$planned_income_m |>
         filter(id == psp_id, year(month) == cur_year) |>
         summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
-      # plus EP credits (negative bookings) — SAP sweeps them at year end
-      income_so_far <- income_so_far + d$ist_monthly |>
-        filter(id == psp_id, year(month) == cur_year, month <= today_month) |>
-        summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
     } else if (psp_id %in% startup_ids) {
       income_so_far <- d$planned_income_m |>
         filter(id == psp_id, month <= today_month) |>
@@ -1919,10 +1924,11 @@ server <- function(input, output, session) {
       summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
     budget_total <- budget_total_kost + budget_total_other + budget_total_nozp
 
-    # IST: Kostenstelle = current year only; others = up to reference date
+    # IST: Kostenstelle = current year only, netted (spending - credits) to
+    # match SAP's Kostenstellenbericht; others = up to reference date
     ist_kost <- d$ist_monthly |>
       filter(id %in% kostenstelle_ids, year(month) == cur_year) |>
-      summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
+      summarise(v = sum(actual_spending - actual_income, na.rm = TRUE)) |> pull(v)
     ist_other <- d$ist_monthly |>
       filter(!id %in% c(kostenstelle_ids, exclude_all), month <= today_month) |>
       summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
@@ -1930,18 +1936,15 @@ server <- function(input, output, session) {
 
     pct_spent <- if (budget_total > 0) round(100 * ist_total / budget_total, 1) else NA_real_
 
-    # Balance: Kostenstelle current year (ZP budget + EP credits); Startup
-    # planned; others actual income
+    # Balance: Kostenstelle current year (ZP budget; credits already netted
+    # into IST); Startup planned; others actual income
     income_kost <- d$planned_income_m |>
       filter(id %in% kostenstelle_ids, year(month) == cur_year) |>
       summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
-    income_kost_credits <- d$ist_monthly |>
-      filter(id %in% kostenstelle_ids, year(month) == cur_year, month <= today_month) |>
-      summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
     income_actual <- d$ist_monthly |>
       filter(!id %in% c(kostenstelle_ids, exclude_all), month <= today_month) |>
       summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
-    balance <- (income_kost + income_kost_credits + income_actual) - ist_total
+    balance <- (income_kost + income_actual) - ist_total
 
     # FTE in current month across all PSPs
     fte_now <- NA_real_
