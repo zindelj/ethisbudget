@@ -415,6 +415,16 @@ load_all_data <- function(ep_path) {
       category        = classify_category(kurztext, buchungstext)
     )
 
+  # EP rows without a parseable date, amount or account are invisible to every
+  # sum and plot — report them instead of losing them silently.
+  ep_bad <- ist_raw |> filter(is.na(month) | is.na(betrag_in_bw) | is.na(id))
+  ep_health <- if (nrow(ep_bad) > 0) paste0(
+    "Einzelposten: ", nrow(ep_bad), " row(s) IGNORED — missing/unparseable ",
+    "Buch_Dat, Betrag or Kontierung (first: Kurztext='", ep_bad$kurztext[1],
+    "', Buch_Dat='", as.character(ep_bad$buch_dat[1]),
+    "', Betrag='", ep_bad$betrag_in_bw[1], "'). These rows are in the export ",
+    "but count in NO total or plot.") else character()
+
   ep_ids <- sort(unique(ist_raw$id[!is.na(ist_raw$id)]))
 
   # --- Konten ---
@@ -611,7 +621,7 @@ load_all_data <- function(ep_path) {
   # --- Data health: everything that was dropped or doesn't cross-match ------
   # Collected here and surfaced on the Load Data tab so silent data loss
   # becomes visible instead of quietly skewing forecasts.
-  health <- c(zp_health, attr(salary_plan, "health"), mirrored_transfers$notes)
+  health <- c(ep_health, zp_health, attr(salary_plan, "health"), mirrored_transfers$notes)
 
   zp_unmatched <- setdiff(unique(zahlungsplan$id), konten$id)
   if (length(zp_unmatched) > 0)
