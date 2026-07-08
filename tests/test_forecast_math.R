@@ -5,7 +5,7 @@ suppressMessages({
 
 # Evaluate only whitelisted top-level function definitions from app.R
 exprs <- parse("app.R")
-want  <- c("%||%", "safe_max_date", "canonical_id",
+want  <- c("%||%", "safe_max_date", "canonical_id", "mirror_reserve_transfers",
            "consumables_per_fte_month", "epic_monthly_avg", "compute_salary_cost",
            "interpolate_balance", "make_forecast_plot", "make_psp_forecast_plot")
 for (e in exprs) {
@@ -125,3 +125,33 @@ ok("Startup account adds incl.-Startup line",       grepl("incl. Startup saldo",
 line_incl <- strsplit(lab4, "\n")[[1]] |> (\(x) x[grepl("Startup", x)])()
 ok("incl.-Startup = expected + saldo (80000-30000)",
    abs(num_in(line_incl) - (num_in(lab1) + 50000)) < 1)
+
+# 9. Year-end settlement: SAP books it only as income on the Reserve; the
+#    Kostenstelle side must be mirrored as expenditure, and the whole lateral
+#    move must be neutral for the total forecast (balance AND burn average).
+d5 <- d
+d5$konten <- bind_rows(d5$konten,
+  tibble(id = "R1", bezeichnung = "Forschungsreserve", typ = "Reserve",
+         laufzeit_date = as_date(NA)))
+transfer_row <- tibble(id = "R1", month = as_date("2026-03-01"),
+                       category = "Transfer Forschungsreserve",
+                       buchungstext = "Jahresabrechnung KST 99999",  # unknown nr -> single-KST fallback
+                       actual_spending = 0, actual_income = 35847.45)
+mir <- mirror_reserve_transfers(bind_rows(d5$ist_raw, transfer_row), d5$konten)
+mrow <- mir$ist_raw |> filter(id == "K1", category == "Transfer Forschungsreserve")
+ok("mirror adds expenditure on the Kostenstelle",
+   nrow(mrow) == 1 && abs(mrow$actual_spending - 35847.45) < 1e-6 &&
+   mrow$actual_income == 0 && mrow$month == as_date("2026-03-01"))
+ok("mirror reports a health note", length(mir$notes) == 1 && grepl("mirrored", mir$notes))
+d5$ist_raw <- mir$ist_raw
+d5$ist_monthly <- d5$ist_raw |> group_by(id, month) |>
+  summarise(actual_income = sum(actual_income), actual_spending = sum(actual_spending), .groups = "drop")
+p5 <- make_forecast_plot(d5, 6, inflation_rate = 0, consumables_rate_month = 1200, epic_monthly = 1500)
+ok("reserve transfer is forecast-neutral (end label unchanged)",
+   identical(lab_of(p5), lab1))
+ok("transfer stays out of avg burn (subtitle unchanged)",
+   identical(p5$labels$subtitle, p1$labels$subtitle))
+# already-booked expenditure side -> no mirroring, warn instead
+mir2 <- mirror_reserve_transfers(mir$ist_raw, d5$konten)
+ok("existing expenditure side blocks re-mirroring",
+   nrow(mir2$ist_raw) == nrow(mir$ist_raw) && grepl("no synthetic", mir2$notes))

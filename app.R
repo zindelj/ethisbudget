@@ -284,8 +284,11 @@ CATEGORY_RULES <- tibble::tribble(
 )
 
 classify_category <- function(kurztext_vec, buchungstext_vec, rules = CATEGORY_RULES) {
+  # SAP exports occasionally pad labels with stray whitespace; the rules match
+  # kurztext by exact equality, so normalise before comparing.
+  kurztext_vec <- str_squish(kurztext_vec)
   out  <- rep("Other", length(kurztext_vec))
-  buch <- ifelse(is.na(buchungstext_vec), "", buchungstext_vec)
+  buch <- str_squish(ifelse(is.na(buchungstext_vec), "", buchungstext_vec))
   general  <- rules[is.na(rules$buchungstext), , drop = FALSE]
   specific <- rules[!is.na(rules$buchungstext), , drop = FALSE]
   for (i in seq_len(nrow(general))) {
@@ -318,7 +321,7 @@ CATEGORY_COLORS <- c(
   "ScopeM"                    = "#4DBBD5",  # NPG cyan
   "Facility costs"            = "#5F9EA0",  # cadet blue (residual)
   "Internal charges"          = "#828282",  # gray
-  "Transfer Forschungsreserve"= "#2F4F4F",  # dark slate (money moved, not spent)
+  "Transfer Forschungsreserve"= "#E377C2",  # D3 pink — deliberately loud: money moved, not spent
   "Other"                     = "#B4AA96"   # tan
 )
 
@@ -326,6 +329,63 @@ CATEGORY_ORDER <- c("Salary","Consumables","Taconic","Animal purchase","Equipmen
                     "IT, Office & Publications","Travel, Events & Training",
                     "FACS","EPIC","ScopeM","Facility costs",
                     "Internal charges","Transfer Forschungsreserve","Other")
+
+# ================================================================
+# Year-end Reserve transfer mirroring
+# ================================================================
+# SAP books the year-end settlement ("Reserve Jahresabr") only ONCE: as a
+# negative amount (= income) on the Forschungsreserve. The Kostenstelle side
+# gets no expenditure row — its saldo is just zeroed inside SAP — so without
+# correction the app would carry the unspent remainder as surplus forever
+# AND count the Reserve income on top. Mirror every transfer income row as a
+# synthetic expenditure on the source Kostenstelle (parsed from the
+# Buchungstext "Jahresabrechnung KST <nr>"; falls back to the single
+# Kostenstelle in Konten). The lateral move then nets to zero everywhere.
+mirror_reserve_transfers <- function(ist_raw, konten) {
+  notes    <- character()
+  kost_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
+  transfers <- ist_raw |> filter(category == "Transfer Forschungsreserve")
+  incoming  <- transfers |> filter(actual_income > 0)
+  if (nrow(incoming) == 0) return(list(ist_raw = ist_raw, notes = notes))
+  # If SAP ever starts booking the expenditure side itself, mirroring would
+  # double it — bail out visibly instead.
+  if (any(transfers$actual_spending > 0)) {
+    return(list(ist_raw = ist_raw, notes = paste0(
+      "Reserve transfer: the EP already contains expenditure-side booking(s) ",
+      "for 'Reserve Jahresabr' — no synthetic Kostenstelle expenditure added. ",
+      "Check that the transfer is not double-counted.")))
+  }
+  incoming <- incoming |>
+    mutate(
+      kst_parsed = canonical_id(str_match(buchungstext, "(?i)KST\\s*([A-Za-z0-9-]+)")[, 2]),
+      target_id  = case_when(
+        !is.na(kst_parsed) & kst_parsed %in% kost_ids ~ kst_parsed,
+        length(kost_ids) == 1                         ~ kost_ids[1],
+        TRUE                                          ~ NA_character_
+      )
+    )
+  unmatched <- incoming |> filter(is.na(target_id))
+  if (nrow(unmatched) > 0)
+    notes <- c(notes, paste0(
+      "Reserve transfer '", unmatched$buchungstext, "' (",
+      format(unmatched$month, "%Y-%m"), "): source Kostenstelle not identified — ",
+      "NO expenditure mirrored; the amount stays double in the books. ",
+      "Check the Buchungstext / Konten IDs."))
+  mirrored <- incoming |>
+    filter(!is.na(target_id)) |>
+    mutate(id              = target_id,
+           actual_spending = actual_income,
+           actual_income   = 0,
+           betrag_in_bw    = actual_spending,
+           buchungstext    = paste0(buchungstext, " (mirrored expenditure)")) |>
+    select(-kst_parsed, -target_id)
+  if (nrow(mirrored) > 0)
+    notes <- c(notes, paste0(
+      "Reserve transfer mirrored: ", format(round(mirrored$actual_spending), big.mark = "'"),
+      " CHF booked as expenditure on Kostenstelle '", mirrored$id, "' (",
+      format(mirrored$month, "%Y-%m"), ") — SAP books only the Reserve side."))
+  list(ist_raw = bind_rows(ist_raw, mirrored), notes = notes)
+}
 
 # ================================================================
 # Load all static data from dirname(ep_path)
@@ -410,6 +470,11 @@ load_all_data <- function(ep_path) {
       konten <- bind_rows(konten, skeleton)
     }
   }
+
+  # --- Mirror year-end Reserve transfers as Kostenstelle expenditure ---
+  # (needs konten for the Typ lookup; must run before ist_monthly is built)
+  mirrored_transfers <- mirror_reserve_transfers(ist_raw, konten)
+  ist_raw            <- mirrored_transfers$ist_raw
 
   # --- Zahlungsplan ---
   zp_path <- file.path(raw_dir, "Zahlungsplan.xlsx")
@@ -546,7 +611,7 @@ load_all_data <- function(ep_path) {
   # --- Data health: everything that was dropped or doesn't cross-match ------
   # Collected here and surfaced on the Load Data tab so silent data loss
   # becomes visible instead of quietly skewing forecasts.
-  health <- c(zp_health, attr(salary_plan, "health"))
+  health <- c(zp_health, attr(salary_plan, "health"), mirrored_transfers$notes)
 
   zp_unmatched <- setdiff(unique(zahlungsplan$id), konten$id)
   if (length(zp_unmatched) > 0)
@@ -843,14 +908,17 @@ make_forecast_plot <- function(d, burn_window_months = 6,
   today_month <- last_ist_month
   if (is.na(today_month)) return(NULL)
 
-  # Past income: EP for grants, ZP for Kostenstelle
+  # Past income: EP for grants AND Reserve (SAP books the year-end transfer as
+  # actual income on the Reserve — see mirror_reserve_transfers), ZP for
+  # Kostenstelle. Reserve ZP entries are ignored here so a manually typed
+  # transfer cannot double-count on top of the EP booking.
   past_income_ist <- ist_ns |>
-    filter(!id %in% c(kostenstelle_ids, reserve_ids)) |>
+    filter(!id %in% kostenstelle_ids) |>
     group_by(month) |>
     summarise(income_ist = sum(actual_income, na.rm = TRUE), .groups = "drop")
 
   kostenstelle_income <- planned_income_m |>
-    filter(id %in% c(kostenstelle_ids, reserve_ids)) |>
+    filter(id %in% kostenstelle_ids) |>
     group_by(month) |>
     summarise(kostenstelle_income = sum(planned_income, na.rm = TRUE), .groups = "drop")
 
@@ -874,11 +942,22 @@ make_forecast_plot <- function(d, burn_window_months = 6,
 
   current_surplus <- last(ts_past$balance)
 
+  # Burn average: the mirrored Reserve transfer counts in the balance (it
+  # leaves the Kostenstelle) but is money moved, not consumed — keep it out
+  # of the historical burn rate.
+  transfer_out_m <- d$ist_raw |>
+    filter(category == "Transfer Forschungsreserve", actual_spending > 0,
+           !id %in% exclude_all) |>
+    group_by(month) |>
+    summarise(transfer_out = sum(actual_spending, na.rm = TRUE), .groups = "drop")
+
   burn_ref <- ts_past |>
+    left_join(transfer_out_m, by = "month") |>
+    mutate(spending_burn = total_spending - replace_na(transfer_out, 0)) |>
     filter(month < today_month) |>
     arrange(desc(month)) |>
     slice_head(n = burn_window_months) |>
-    summarise(avg = mean(total_spending, na.rm = TRUE)) |>
+    summarise(avg = mean(spending_burn, na.rm = TRUE)) |>
     pull(avg)
   if (!is.finite(burn_ref)) burn_ref <- 0  # no past spending months at all
 
@@ -1062,7 +1141,9 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
   kostenstelle_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
   reserve_ids      <- konten |> filter(typ == "Reserve")      |> pull(id)
 
-  planned_funded <- psp_id %in% c(kostenstelle_ids, startup_ids, reserve_ids)
+  # Reserve is NOT planned-funded: its income arrives as actual EP bookings
+  # (year-end transfer, see mirror_reserve_transfers), not via Zahlungsplan.
+  planned_funded <- psp_id %in% c(kostenstelle_ids, startup_ids)
 
   # Past
   ist_psp <- ist_monthly |> filter(id == psp_id)
@@ -1093,11 +1174,21 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
 
   current_surplus <- last(ts_past$balance)
 
+  # Keep the mirrored Reserve transfer out of the burn average (money moved,
+  # not consumed) — same treatment as in make_forecast_plot.
+  transfer_out_m <- d$ist_raw |>
+    filter(id == psp_id, category == "Transfer Forschungsreserve",
+           actual_spending > 0) |>
+    group_by(month) |>
+    summarise(transfer_out = sum(actual_spending, na.rm = TRUE), .groups = "drop")
+
   burn_ref <- ts_past |>
+    left_join(transfer_out_m, by = "month") |>
+    mutate(spending_burn = total_spending - replace_na(transfer_out, 0)) |>
     filter(month < today_month) |>
     arrange(desc(month)) |>
     slice_head(n = burn_window_months) |>
-    summarise(avg = mean(total_spending, na.rm = TRUE)) |>
+    summarise(avg = mean(spending_burn, na.rm = TRUE)) |>
     pull(avg)
   if (!is.finite(burn_ref)) burn_ref <- 0  # no past spending months at all
 
