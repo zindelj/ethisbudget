@@ -6,6 +6,7 @@ suppressMessages({
 # Evaluate only whitelisted top-level function definitions from app.R
 exprs <- parse("app.R")
 want  <- c("%||%", "safe_max_date", "canonical_id", "mirror_reserve_transfers",
+           "resolve_ep_id_aliases",
            "consumables_per_fte_month", "epic_monthly_avg", "compute_salary_cost",
            "interpolate_balance", "make_forecast_plot", "make_psp_forecast_plot")
 for (e in exprs) {
@@ -171,3 +172,16 @@ ok("Kostenstelle credit raises total forecast by 5000",
 p7 <- make_psp_forecast_plot("K1", d6, 6, consumables_rate_month = 1200, epic_monthly = 0)
 ok("per-PSP forecast with credit builds", !is.null(p7))
 invisible(ggplot_build(p7))
+
+# 11. PSP-element ID variant ("5-029870-000" -> canonical "5-029870") is
+#     remapped to the matching konto; unrelated ids stay untouched.
+al <- resolve_ep_id_aliases(
+  tibble(id = c("5-029870", "29870", "G9"), month = as_date("2026-01-01"),
+         category = "Other", actual_spending = c(604, 100, 50), actual_income = 0),
+  tibble(id = c("29870", "K1"), typ = "Kostenstelle"))
+ok("PSP-element id remapped to konto",
+   identical(sort(unique(al$ist_raw$id)), c("29870", "G9")) &&
+   sum(al$ist_raw$actual_spending[al$ist_raw$id == "29870"]) == 704 &&
+   grepl("read as konto '29870'", al$notes))
+ok("no aliases -> no notes",
+   length(resolve_ep_id_aliases(d$ist_raw, d$konten)$notes) == 0)

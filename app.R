@@ -331,6 +331,31 @@ CATEGORY_ORDER <- c("Salary","Consumables","Taconic","Animal purchase","Equipmen
                     "Internal charges","Transfer Forschungsreserve","Other")
 
 # ================================================================
+# EP account aliasing
+# ================================================================
+# SAP sometimes books on the PSP-element form of an account
+# ("5-029870-000" for Kostenstelle 29870). After canonical_id that survives
+# as "5-029870", which matches no konto — the booking counts in lab-wide
+# totals but leaks out of every per-PSP view and header. If stripping the
+# "<digit>-0…" prefix of an unmatched EP id yields a known konto, remap it,
+# and report the alias so nothing happens silently.
+resolve_ep_id_aliases <- function(ist_raw, konten) {
+  unmatched <- setdiff(unique(ist_raw$id[!is.na(ist_raw$id)]), konten$id)
+  alias <- tibble(from = unmatched) |>
+    mutate(to = str_replace(from, "^\\d-0*", "")) |>
+    filter(from != to, to %in% konten$id)
+  if (nrow(alias) == 0) return(list(ist_raw = ist_raw, notes = character()))
+  ist_raw <- ist_raw |>
+    left_join(alias, by = c("id" = "from")) |>
+    mutate(id = coalesce(to, id)) |>
+    select(-to)
+  list(ist_raw = ist_raw,
+       notes = paste0("Einzelposten: account '", alias$from,
+                      "' read as konto '", alias$to,
+                      "' (PSP-element form of the same account)."))
+}
+
+# ================================================================
 # Year-end Reserve transfer mirroring
 # ================================================================
 # SAP books the year-end settlement ("Reserve Jahresabr") only ONCE: as a
@@ -481,6 +506,12 @@ load_all_data <- function(ep_path) {
     }
   }
 
+  # --- Resolve PSP-element ID variants against Konten ---
+  # (needs konten; must run before ist_monthly and the transfer mirroring)
+  aliased <- resolve_ep_id_aliases(ist_raw, konten)
+  ist_raw <- aliased$ist_raw
+  ep_ids  <- sort(unique(ist_raw$id[!is.na(ist_raw$id)]))
+
   # --- Mirror year-end Reserve transfers as Kostenstelle expenditure ---
   # (needs konten for the Typ lookup; must run before ist_monthly is built)
   mirrored_transfers <- mirror_reserve_transfers(ist_raw, konten)
@@ -621,7 +652,8 @@ load_all_data <- function(ep_path) {
   # --- Data health: everything that was dropped or doesn't cross-match ------
   # Collected here and surfaced on the Load Data tab so silent data loss
   # becomes visible instead of quietly skewing forecasts.
-  health <- c(ep_health, zp_health, attr(salary_plan, "health"), mirrored_transfers$notes)
+  health <- c(ep_health, aliased$notes, zp_health, attr(salary_plan, "health"),
+              mirrored_transfers$notes)
 
   zp_unmatched <- setdiff(unique(zahlungsplan$id), konten$id)
   if (length(zp_unmatched) > 0)
