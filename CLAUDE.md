@@ -36,7 +36,7 @@ shiny::runApp("app.R")
 renv::restore()
 ```
 
-Synthetic-data tests live in `tests/` — run from the repo root with `Rscript --vanilla tests/test_forecast_math.R` and `Rscript --vanilla tests/test_health.R`. They parse the needed function definitions straight out of `app.R` (no Shiny session required) and pin down the forecast math (consumables rate, EPIC line, salary cost) and the data-health reporting. Run them after touching those functions. There is no linter config and no build step.
+Synthetic-data tests live in `tests/` — run from the repo root with `Rscript --vanilla tests/test_forecast_math.R`, `Rscript --vanilla tests/test_health.R` and `Rscript --vanilla tests/test_handover.R`. They parse the needed function definitions straight out of `app.R` (no Shiny session required) and pin down the forecast math (consumables rate, EPIC line, salary cost), the data-health reporting, and the anonymisation guarantees of the handover export (no names, IDs or Buchungstexte in the output). Run them after touching those functions. There is no linter config and no build step.
 
 ## Code architecture
 
@@ -57,6 +57,7 @@ There are no R modules and no `R/` directory. Everything (helpers, data loading,
 | 882–1076 | Per-PSP runway forecast | `make_psp_forecast_plot` |
 | 1077–1136 | Salary heatmap | `make_salary_heatmap` |
 | 1137–1168 | Zahlungsplan heatmap | `make_zp_heatmap` |
+| (before UI) | Anonymised handover export | `build_handover` (+ `handover_md_table`, `handover_wide_years`) |
 | 1169–1306 | UI (`page_navbar`, 9 `nav_panel`s) | `ui` |
 | 1307–2719 | Server | `server` |
 | 2720 | `shinyApp(ui, server)` |
@@ -81,6 +82,10 @@ The server holds the `d` list inside `reactiveValues` (`rv$data`). All tabs read
 ### Data folder picker
 
 The Load Data tab uses `shinyFiles::shinyDirButton` (not Shiny's `fileInput`, which would lose the original folder path due to browser upload semantics). Picking a folder triggers two reactives: `picked_data_dir()` resolves the path, and `picked_ep_file()` scans for `^export_\d{8}_\d{6}\.xlsx$` and selects the lexicographically latest match. The full EP path (`file.path(dir, ep)`) is then handed to `load_all_data()`. Selection is session-scoped — nothing persists across restarts.
+
+### Handover export (`build_handover`)
+
+`build_handover(d, ...)` turns the loaded `d` list into an anonymised Markdown summary for sharing with cloud tools (grant writing). It is the only exporter and is reused by three entry points: the Load Data tab button, `handover.R` (standalone `Rscript`, loads every top-level assignment from `app.R` except `ui`/`server`, so it needs no Shiny) and `Handover ethisbudget.bat`. Invariants to preserve when editing it: never emit `name`, `buchungstext`, `kurztext` rows, `bezeichnung` (unless `include_konto_names`) or raw konto `id`s — kontos are relabelled by Typ and the mapping goes to the `*_KEY.txt`; keep the final scrub pass (names, IDs, 5+ digit runs, IBAN-like strings → `[redacted]`) as the last step before writing. `tests/test_handover.R` asserts these guarantees on synthetic data.
 
 ### PSP IDs
 

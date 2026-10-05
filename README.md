@@ -48,6 +48,22 @@ Place an SAP export named **`export_YYYYMMDD_HHMMSS.xlsx`** (e.g. `export_202605
 | 🔮 Forecast (per PSP) | Runway forecast for individual grants |
 | 🔮 Forecast (Total) | Portfolio-level runway with salary + investment toggles |
 
+## Handover file for grant writing (anonymised)
+
+When you want to discuss budget numbers with a cloud tool (e.g. while drafting a grant), do not upload the Excel files. Instead generate a **handover file**: a Markdown summary with spending by category and year, actual and planned salary cost by *role*, consumables-per-FTE and EPIC run rates, planned income and investments. It contains **no person names, no Buchungstexte, no vendor names and no account/PSP numbers** — kontos are relabelled G1, K1, S1 … and the mapping is written to a separate `*_KEY.txt` that must stay local. A final scrub pass redacts anything that still looks like a name, an ID or a long number and tells you about it.
+
+Three ways to run it (all write `handover_<date>.md` + `handover_<date>_KEY.txt` into your data folder):
+
+| How | What to do |
+|-----|-----------|
+| In the app | 📁 Load Data → load your folder → **Generate handover file** |
+| Double-click | **`Handover ethisbudget.bat`** — a folder picker opens, pick your data folder |
+| Command line | `Rscript handover.R "C:\\path\\to\\data" [--names] [--window 12]` |
+
+`--names` (or the checkbox in the app) also includes the konto Bezeichnungen (grant titles); person names inside a title are still redacted. `--window N` sets the run-rate window in months.
+
+Share the `.md`, keep the `_KEY.txt`.
+
 ## Dependencies
 
 ```r

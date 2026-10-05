@@ -1637,6 +1637,261 @@ make_epic_plot <- function(d, avg_window = 12) {
 }
 
 # ================================================================
+# Handover export (anonymised summary for grant writing / cloud AI)
+# ================================================================
+# build_handover() writes a Markdown summary of what the lab spends, earns
+# and plans that is safe to paste into a cloud tool: NO person names, NO
+# Buchungstexte / vendor names, NO account or PSP numbers. Kontos are
+# relabelled by Typ (G1, G2 = Grants, K1 = Kostenstelle, S1 = Startup,
+# R1 = Reserve, E1 = Erlöse); the label→ID mapping goes to a separate
+# *_KEY.txt that must stay local. A final scrub pass replaces any surviving
+# person name, konto ID or long digit run with [redacted] and reports it,
+# so a leak can never pass silently. Shared by the Load Data tab button and
+# the standalone `handover.R` / `Handover ethisbudget.bat`.
+
+handover_fmt <- function(x) {
+  ifelse(is.na(x), "", format(round(x), big.mark = "'", scientific = FALSE, trim = TRUE))
+}
+
+handover_md_table <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return("_(no data)_")
+  df <- df |>
+    mutate(across(where(is.numeric), handover_fmt),
+           across(everything(), ~ ifelse(is.na(.x), "", as.character(.x))))
+  hdr  <- paste0("| ", paste(names(df), collapse = " | "), " |")
+  sep  <- paste0("|", paste(rep("---", ncol(df)), collapse = "|"), "|")
+  rows <- apply(as.matrix(df), 1, function(r) paste0("| ", paste(r, collapse = " | "), " |"))
+  paste(c(hdr, sep, rows), collapse = "\n")
+}
+
+# rows = `rowvar`, one column per year, plus Total. Input: rowvar, year, v.
+handover_wide_years <- function(df, rowvar) {
+  if (is.null(df) || nrow(df) == 0) return(df)
+  w <- df |>
+    mutate(year = as.character(year)) |>
+    group_by(.data[[rowvar]], year) |>
+    summarise(v = sum(v, na.rm = TRUE), .groups = "drop") |>
+    pivot_wider(names_from = year, values_from = v, values_fill = 0, names_sort = TRUE) |>
+    arrange(match(.data[[rowvar]], unique(df[[rowvar]])))   # keep caller's row order
+  w$Total <- rowSums(as.matrix(w[, -1, drop = FALSE]))
+  w
+}
+
+build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
+                           stamp = format(Sys.Date(), "%Y%m%d"), window_months = 12) {
+  ref  <- as_date(d$reference_date)
+  ist  <- d$ist_raw |> filter(!is.na(month), !is.na(id))
+  kont <- d$konten  |> mutate(typ = coalesce(typ, "Unknown"))
+
+  # --- pseudonymous konto labels ------------------------------------------
+  prefix <- c(grant = "G", kostenstelle = "K", startup = "S", reserve = "R", "erlöse" = "E")
+  kont <- kont |>
+    mutate(pfx = coalesce(unname(prefix[tolower(typ)]), "X")) |>
+    group_by(pfx) |> arrange(id, .by_group = TRUE) |>
+    mutate(label = paste0(pfx, row_number())) |>
+    ungroup() |> select(-pfx)
+  other_ids <- setdiff(unique(ist$id), kont$id)
+  key <- bind_rows(
+    kont |> select(label, id, typ, bezeichnung),
+    tibble(label = paste0("U", seq_along(other_ids)), id = other_ids,
+           typ = "(not in Konten)", bezeichnung = NA_character_))
+  lab <- setNames(key$label, key$id)
+  ist <- ist |> mutate(Konto = unname(lab[id]), year = year(month))
+
+  # --- 1. accounts ---------------------------------------------------------
+  per_konto <- ist |> group_by(id) |>
+    summarise(first = min(month), last = max(month),
+              income = sum(actual_income, na.rm = TRUE),
+              spending = sum(actual_spending, na.rm = TRUE), .groups = "drop")
+  konten_tbl <- key |>
+    left_join(per_konto, by = "id") |>
+    left_join(kont |> select(id, laufzeit_date), by = "id") |>
+    transmute(Konto = label, Typ = typ, Bezeichnung = bezeichnung,
+              `Laufzeit bis`   = ifelse(is.na(laufzeit_date), "", format(laufzeit_date, "%Y-%m-%d")),
+              `First booking`  = ifelse(is.na(first), "", format(first, "%Y-%m")),
+              `Last booking`   = ifelse(is.na(last),  "", format(last,  "%Y-%m")),
+              `Income to date` = income, `Spending to date` = spending,
+              Balance = coalesce(income, 0) - coalesce(spending, 0))
+  if (!include_konto_names) konten_tbl$Bezeichnung <- NULL
+
+  # --- 2. spending ---------------------------------------------------------
+  spend <- ist |> filter(actual_spending != 0) |>
+    mutate(category = factor(category, levels = c(CATEGORY_ORDER,
+                             setdiff(unique(category), CATEGORY_ORDER)))) |>
+    arrange(category) |> mutate(category = as.character(category))
+  cat_year   <- handover_wide_years(spend |> transmute(Category = category, year, v = actual_spending), "Category")
+  konto_year <- handover_wide_years(spend |> transmute(Konto, year, v = actual_spending), "Konto")
+  konto_cat  <- if (nrow(spend) > 0) spend |>
+    group_by(Konto, category) |>
+    summarise(v = sum(actual_spending), .groups = "drop") |>
+    pivot_wider(names_from = category, values_from = v, values_fill = 0) |>
+    select(Konto, any_of(CATEGORY_ORDER), everything()) else spend
+  if (nrow(konto_cat) > 0) konto_cat$Total <- rowSums(as.matrix(konto_cat[, -1, drop = FALSE]))
+  income_year <- handover_wide_years(
+    ist |> filter(actual_income != 0) |> transmute(Konto, year, v = actual_income), "Konto")
+
+  # --- 3. run rate over the trailing window --------------------------------
+  win_start <- ref %m-% months(window_months)
+  last_w <- ist |> filter(month > win_start, month <= ref, actual_spending != 0) |>
+    group_by(Category = category) |>
+    summarise(`CHF in window` = sum(actual_spending), .groups = "drop") |>
+    mutate(`CHF / month` = `CHF in window` / window_months,
+           `Share %`     = 100 * `CHF in window` / sum(`CHF in window`)) |>
+    arrange(desc(`CHF in window`))
+  rate <- tryCatch(consumables_per_fte_month(d, window_months), error = function(e) NULL)
+  epic <- tryCatch(epic_monthly_avg(d, window_months), error = function(e) NA_real_)
+
+  # --- 4. salary: actual (EP) and plan (by role) ----------------------------
+  sal_year <- handover_wide_years(
+    spend |> filter(category == "Salary") |> transmute(Konto, year, v = actual_spending), "Konto")
+
+  sp <- d$salary_plan_full %||% d$salary_plan
+  role_year <- role_konto <- fte_timeline <- NULL
+  if (!is.null(sp) && nrow(sp) > 0) {
+    spm <- sp |>
+      mutate(month = as_date(month), year = year(month),
+             role  = coalesce(na_if(str_trim(as.character(role)), ""), "Other"),
+             fte   = coalesce(fte, 1),
+             Konto = coalesce(unname(lab[psp]), "(no PSP)"))
+    role_year <- spm |>
+      group_by(Role = role, Year = year) |>
+      summarise(Persons = n_distinct(name), `FTE-months` = sum(fte),
+                `CHF total` = sum(amount), .groups = "drop") |>
+      mutate(`CHF / FTE-month` = `CHF total` / `FTE-months`,
+             Status = case_when(Year < year(ref) ~ "past", Year > year(ref) ~ "planned",
+                                TRUE ~ "current year")) |>
+      arrange(Role, Year) |>
+      mutate(Year = as.character(Year))   # keep years out of the 1'000 formatting
+    role_konto <- spm |>
+      group_by(Role = role, Konto) |>
+      summarise(Persons = n_distinct(name), `FTE-months` = sum(fte),
+                `CHF total` = sum(amount), .groups = "drop") |>
+      arrange(Role, Konto)
+    fte_timeline <- spm |>
+      filter(month(month) %in% c(1, 7)) |>
+      group_by(Month = format(month, "%Y-%m"), role) |>
+      summarise(FTE = sum(fte), .groups = "drop") |>
+      pivot_wider(names_from = role, values_from = FTE, values_fill = 0)
+    if (nrow(fte_timeline) > 0)
+      fte_timeline$`Total FTE` <- rowSums(as.matrix(fte_timeline[, -1, drop = FALSE]))
+  }
+
+  lohn_tbl <- if (!is.null(d$lohntabelle) && nrow(d$lohntabelle) > 0)
+    d$lohntabelle |>
+      transmute(Rolle = rolle, Jahr = jahr, `Jahresgehalt CHF` = as.numeric(jahresgehalt_chf),
+                `Monatlich CHF` = monatlich) |>
+      arrange(Rolle, Jahr) |> mutate(Jahr = as.character(Jahr)) else NULL
+
+  # --- 5. planned income & investments --------------------------------------
+  zp <- d$zahlungsplan |> filter(!is.na(date), planned_income != 0) |>
+    mutate(Konto = coalesce(unname(lab[id]), id), year = year(date))
+  zp_year     <- handover_wide_years(zp |> transmute(Konto, year, v = planned_income), "Konto")
+  zp_upcoming <- zp |> filter(date > ref) |> arrange(date) |>
+    transmute(Due = format(date, "%Y-%m-%d"), Konto, `CHF` = planned_income)
+
+  inv <- d$investments
+  inv_tbl <- if (!is.null(inv) && nrow(inv) > 0) inv |>
+    arrange(month) |>
+    transmute(Month = format(month, "%Y-%m"), `CHF` = amount, Category = cat,
+              Konto = coalesce(unname(lab[psp]), "(no PSP)"), Description = desc) else NULL
+
+  # --- assemble markdown ----------------------------------------------------
+  sec <- function(title, body) c(paste0("## ", title), "", body, "")
+  md <- c(
+    "# Lab budget handover (anonymised)", "",
+    paste0("Generated ", format(Sys.Date(), "%Y-%m-%d"), " from an SAP Einzelpostenbericht whose ",
+           "last booked month is **", format(ref, "%Y-%m"), "**. All amounts in CHF."), "",
+    paste0("**Anonymisation.** Kontos (PSP accounts) are pseudonyms: G = grant, K = Kostenstelle ",
+           "(core budget), S = Startup, R = Forschungsreserve, E = Erlöse, U = not in Konten. ",
+           "People appear only as roles and counts. No Buchungstexte, vendor names or account ",
+           "numbers are included. The label→account key is in a separate file that stays local."), "",
+    paste0("**Reading the numbers.** Spending is positive = money out, with SAP Gutschriften ",
+           "(credits) netted in. 'Salary' is the booked employer cost incl. social contributions. ",
+           "'EPIC' is the animal facility, 'FACS'/'ScopeM' are core facilities. ",
+           "'Transfer Forschungsreserve' is the year-end move of unspent Kostenstelle money into ",
+           "the Reserve — a transfer, not consumption. Startup money is excluded from the ",
+           "consumables-per-FTE rate."), "",
+    sec("1. Accounts", handover_md_table(konten_tbl)),
+    sec("2. Spending by category and year (all kontos)", handover_md_table(cat_year)),
+    sec("3. Spending by konto and year", handover_md_table(konto_year)),
+    sec("4. Spending by konto and category (whole period)", handover_md_table(konto_cat)),
+    sec("5. Actual income by konto and year (tranches received)", handover_md_table(income_year)),
+    sec(paste0("6. Run rate — last ", window_months, " months (", format(win_start %m+% months(1), "%Y-%m"),
+               " to ", format(ref, "%Y-%m"), ")"),
+        c(handover_md_table(last_w), "",
+          if (!is.null(rate)) c(
+            paste0("- Average FTE in the salary plan over the window: **", round(rate$past_fte, 2), "**"),
+            paste0("- Non-salary, non-EPIC spend in the window (excl. Startup, excl. Reserve transfer): **",
+                   handover_fmt(rate$nonsalary_total), "**"),
+            paste0("- Consumables rate: **", handover_fmt(rate$per_fte_month), " CHF per FTE per month** = **",
+                   handover_fmt(rate$per_fte_month * 12), " CHF per FTE per year**")),
+          if (!is.na(epic)) paste0("- EPIC (animal facility) average: **", handover_fmt(epic), " CHF / month**"))),
+    sec("7. Actual salary cost by konto and year (booked in SAP)", handover_md_table(sal_year)),
+    sec("8. Salary plan by role and year (planned personnel, from Salaryplan.xlsx)",
+        c("Persons = distinct people in that role/year; CHF / FTE-month = planned monthly cost of one full-time position.", "",
+          handover_md_table(role_year))),
+    sec("9. Salary plan by role and funding konto", handover_md_table(role_konto)),
+    sec("10. Planned team size (FTE by role, each January and July)", handover_md_table(fte_timeline)),
+    sec("11. Salary scale (Lohntabelle: standard rates by role and year)", handover_md_table(lohn_tbl)),
+    sec("12. Planned income by konto and year (Zahlungsplan)", handover_md_table(zp_year)),
+    sec("13. Upcoming tranches", handover_md_table(zp_upcoming)),
+    sec("14. Planned investments", handover_md_table(inv_tbl)),
+    sec("15. Data quality", paste0("The app reported ", length(d$health),
+        " data notice(s) at load time (details omitted here — they may contain IDs)."))
+  )
+  text <- paste(md, collapse = "\n")
+
+  # --- scrub pass -----------------------------------------------------------
+  # Anything that must never appear: person names (and their tokens), konto
+  # IDs, Bezeichnungen (unless requested), 5+ digit runs, IBAN-like strings.
+  hits <- character()
+  names_full <- if (!is.null(sp)) unique(na.omit(as.character(sp$name))) else character()
+  safe_words <- tolower(unique(unlist(str_split(
+    c(CATEGORY_ORDER, if (!is.null(sp)) sp$role, key$typ, month.name, month.abb,
+      "PhD", "Student", "Postdoc", "Other", "Total", "Konto", "Grant"), "[^A-Za-zÀ-ÿ]+"))))
+  name_tokens <- unique(unlist(str_split(names_full, "[\\s,._()-]+")))
+  name_tokens <- name_tokens[nchar(name_tokens) >= 3 & !tolower(name_tokens) %in% safe_words]
+  forbidden <- unique(c(names_full, name_tokens, key$id,
+                        if (!include_konto_names) key$bezeichnung))
+  forbidden <- forbidden[!is.na(forbidden) & nchar(forbidden) >= 3]
+  for (f in forbidden[order(-nchar(forbidden))]) {
+    pat <- regex(paste0("(?<![A-Za-zÀ-ÿ0-9])", stringr::str_escape(f), "(?![A-Za-zÀ-ÿ0-9])"),
+                 ignore_case = TRUE)
+    if (str_detect(text, pat)) {
+      hits <- c(hits, paste0("'", f, "' — ", str_count(text, pat), "x"))
+      text <- str_replace_all(text, pat, "[redacted]")
+    }
+  }
+  for (pat in c("\\bCH\\d{2}(?:\\s?[A-Za-z0-9]{4}){4,5}\\b", "(?<![\\d'])\\d{5,}(?![\\d'])")) {
+    n <- str_count(text, pat)
+    if (n > 0) {
+      hits <- c(hits, paste0("pattern ", pat, " — ", n, "x"))
+      text <- str_replace_all(text, pat, "[redacted]")
+    }
+  }
+  if (length(hits) > 0)
+    text <- paste0(text, "\n\n_Scrub pass replaced ", length(hits),
+                   " string(s) that looked like identifiers; see the local KEY file._\n")
+
+  # --- write ----------------------------------------------------------------
+  out_md  <- file.path(out_dir, paste0("handover_", stamp, ".md"))
+  out_key <- file.path(out_dir, paste0("handover_", stamp, "_KEY.txt"))
+  write_utf8 <- function(lines, path) {
+    con <- file(path, open = "w", encoding = "UTF-8"); on.exit(close(con))
+    writeLines(enc2utf8(lines), con)
+  }
+  write_utf8(text, out_md)
+  write_utf8(c("KEEP THIS FILE LOCAL — it maps the pseudonyms in the handover file to real accounts.", "",
+               sprintf("%-6s %-12s %-14s %s", "Label", "ID", "Typ", "Bezeichnung"),
+               sprintf("%-6s %-12s %-14s %s", key$label, key$id, key$typ, coalesce(key$bezeichnung, "")),
+               "", if (length(hits) > 0) c("Scrub pass replaced:", paste0("  ", hits))
+               else "Scrub pass: nothing suspicious found."),
+             out_key)
+  invisible(list(md = out_md, key = out_key, scrub_hits = length(hits), hits = hits))
+}
+
+
+# ================================================================
 # UI
 # ================================================================
 ui <- page_navbar(
@@ -1662,6 +1917,16 @@ ui <- page_navbar(
       actionButton("btn_load", "Load", class = "btn-primary mt-2"),
       uiOutput("ui_load_status"),
       uiOutput("ui_data_health")
+    ),
+    card(
+      card_header("Handover file for grant writing"),
+      helpText("Writes an anonymised Markdown summary (spending by category, salary by role, ",
+               "income plan, run rates) into the data folder. It contains no person names, ",
+               "Buchungstexte or account numbers, so it can be shared with a cloud tool. ",
+               "The label→account key goes to a separate *_KEY.txt that must stay local."),
+      checkboxInput("handover_names", "Include konto Bezeichnungen (grant titles)", value = FALSE),
+      actionButton("btn_handover", "Generate handover file", class = "btn-outline-secondary"),
+      uiOutput("ui_handover_status")
     )
   ),
 
@@ -1893,6 +2158,30 @@ server <- function(input, output, session) {
         showNotification(paste("❌ Error:", e$message), type = "error", duration = 10)
       })
     })
+  })
+
+  # --- Handover export (anonymised) ---------------------------------------
+  handover_res <- reactiveVal(NULL)
+  observeEvent(input$btn_handover, {
+    if (is.null(rv$data)) { showNotification("Load data first.", type = "warning"); return() }
+    res <- tryCatch(
+      build_handover(rv$data, include_konto_names = isTRUE(input$handover_names)),
+      error = function(e) {
+        showNotification(paste("❌ Handover error:", e$message), type = "error", duration = 10)
+        NULL
+      })
+    if (is.null(res)) return()
+    handover_res(res)
+    showNotification("✅ Handover file written to the data folder.", type = "message", duration = 5)
+  })
+  output$ui_handover_status <- renderUI({
+    res <- handover_res(); req(res)
+    div(class = "alert alert-success mt-2",
+        p(strong("Share this: "), tags$code(res$md)),
+        p(strong("Keep local: "), tags$code(res$key)),
+        if (res$scrub_hits > 0)
+          p(class = "text-danger mb-0", paste0("The scrub pass replaced ", res$scrub_hits,
+            " string(s) that looked like identifiers — review the KEY file before sharing.")))
   })
 
   output$ui_load_status <- renderUI({
