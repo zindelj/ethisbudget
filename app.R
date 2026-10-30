@@ -340,7 +340,7 @@ CATEGORY_COLORS <- c(
   "Salary"                    = "#0073C2",  # JCO blue
   "Consumables"               = "#00A087",  # NPG teal-green
   "Taconic"                   = "#7E6148",  # NPG saddle brown
-  "Animal purchase"           = "#B09C85",  # NPG tan (paired with Taconic)
+  "Animal purchase"           = "#B8860B",  # dark goldenrod — yellow-brown, sits next to EPIC gold
   "Equipment"                 = "#FF7F0E",  # D3 orange
   "IT, Office & Publications" = "#9467BD",  # D3 purple
   "Travel, Events & Training" = "#E64B35",  # NPG red
