@@ -41,7 +41,7 @@ Place an SAP export named **`export_YYYYMMDD_HHMMSS.xlsx`** (e.g. `export_202605
 | 📁 Load Data | Pick data folder, see which EP file will load, see load status |
 | 📊 Monitoring (per PSP) | Income, spending and balance per grant |
 | 📊 Monitoring (All PSPs) | Portfolio-level overview |
-| 👥 Salary Plan | Plan personnel costs by person/month/PSP |
+| 👥 Salary Plan | Plan personnel costs by person/month/PSP. CHF = what the account is actually charged that month (lump sums stay lump sums); FTE = time physically in the lab (from HR), used only for headcount and the consumables-per-FTE rate — 0 for someone paid but not working in the lab |
 | 💳 Zahlungsplan | Edit expected income tranches, heatmap overview |
 | 💰 Investments | Plan one-off large costs (equipment, sequencing, etc.) |
 | 📋 Konten | Edit PSP account details |
