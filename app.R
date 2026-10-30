@@ -645,7 +645,7 @@ load_all_data <- function(ep_path) {
     message("Zahlungsplan.xlsx not found — creating empty file.")
     empty_df  <- data.frame(Fallig = character(), Betrag = character(),
                              Bezeichnung = character(), stringsAsFactors = FALSE)
-    grant_ids <- konten |> filter(!tolower(typ) %in% c("kostenstelle","reserve","erlöse","startup")) |> pull(id)
+    grant_ids <- konten |> filter(!tolower(typ) %in% c("kostenstelle","reserve","erlöse")) |> pull(id)
     if (length(grant_ids) == 0) grant_ids <- ep_ids
     zp_bootstrap <- setNames(lapply(grant_ids, function(x) empty_df), grant_ids)
     writexl::write_xlsx(zp_bootstrap, zp_path)
@@ -880,7 +880,9 @@ make_psp_plot <- function(psp_id, d) {
         # balance must too, or December ends below zero by exactly that amount.
         psp_id %in% kostenstelle_ids ~ ave(planned_income + actual_income, year, FUN = cumsum) -
                                        ave(actual_spending, year, FUN = cumsum),
-        psp_id %in% startup_ids      ~ cumsum(planned_income - actual_spending),
+        # Startup (ETH-allocated money, never an EP income row): the ZP
+        # figure on its date plus any EP income (reimbursements), as for K.
+        psp_id %in% startup_ids      ~ cumsum(planned_income + actual_income - actual_spending),
         TRUE                         ~ cumsum(actual_income  - actual_spending)
       ),
       # Fix: actual balance line ends at last IST month
@@ -963,7 +965,7 @@ make_psp_plot <- function(psp_id, d) {
 # Consumables-per-FTE rate (single source of truth)
 # ================================================================
 # Historical non-salary, non-EPIC spend per FTE per month, calibrated GLOBALLY
-# (all grants, Startup excluded) over the burn window. EPIC (animal facility)
+# (all accounts, Equipment excluded) over the burn window. EPIC (animal facility)
 # is excluded because it is a background cost largely independent of FTE — it
 # gets its own forecast line (see epic_monthly_avg). "Transfer Forschungs-
 # reserve" (year-end Kostenstelle→Reserve transfer) is excluded because it is
@@ -975,17 +977,19 @@ make_psp_plot <- function(psp_id, d) {
 # toggles do not retroactively shrink the past team that actually generated the
 # spend. The plan only holds rows with amount > 0 (see load_salaryplan), so each
 # person counts only for months they were present/paid.
+# Equipment is left out of the rate: one-off purchases (the Startup
+# microscope money) are not FTE-driven and are planned on the Investments tab.
+CONSUMABLES_RATE_EXCLUDED_CATEGORIES <- c("Salary", "EPIC", "Equipment", "Transfer Forschungsreserve")
 consumables_per_fte_month <- function(d, burn_window_months) {
   today_month <- as_date(d$reference_date)
   sp_full     <- d$salary_plan_full %||% d$salary_plan
-  startup_ids <- d$konten |> filter(typ == "Startup") |> pull(id)
 
-  ist_f <- d$ist_raw |> filter(!id %in% startup_ids)
+  ist_f <- d$ist_raw
   win_start <- today_month %m-% months(burn_window_months)
   nonsalary_total <- tryCatch(
     # net sum: Gutschriften (negative actual_spending) reduce the rate
     ist_f |> filter(month > win_start, month <= today_month,
-                    !category %in% c("Salary", "EPIC", "Transfer Forschungsreserve")) |>
+                    !category %in% CONSUMABLES_RATE_EXCLUDED_CATEGORIES) |>
       summarise(s = sum(actual_spending, na.rm = TRUE)) |> pull(s),
     error = function(e) 0
   )
@@ -1104,7 +1108,7 @@ make_forecast_plot <- function(d, burn_window_months = 6,
   startup_ids       <- konten |> filter(typ == "Startup")      |> pull(id)
   kostenstelle_ids  <- konten |> filter(typ == "Kostenstelle") |> pull(id)
   reserve_ids       <- konten |> filter(typ == "Reserve")      |> pull(id)
-  exclude_all       <- c(startup_ids, exclude_ids)
+  exclude_all       <- exclude_ids
 
   ist_ns <- ist_monthly |> filter(!id %in% exclude_all)
 
@@ -1112,17 +1116,17 @@ make_forecast_plot <- function(d, burn_window_months = 6,
   if (is.na(today_month)) return(NULL)
 
   # Past income: EP actual income for ALL accounts — grants, the Reserve
-  # (year-end transfer, see mirror_reserve_transfers), and Kostenstelle
-  # credits/refunds (the annual budget itself never appears as an EP income
-  # row, so no double count) — plus the ZP budget for the Kostenstelle.
-  # Reserve ZP entries are ignored so a manually typed transfer cannot
-  # double-count on top of the EP booking.
+  # (year-end transfer, see mirror_reserve_transfers), Kostenstelle and
+  # Startup credits/refunds (their allocations never appear as EP income
+  # rows, so no double count) — plus the ZP allocations of Kostenstelle and
+  # Startup accounts. Reserve ZP entries are ignored so a manually typed
+  # transfer cannot double-count on top of the EP booking.
   past_income_ist <- ist_ns |>
     group_by(month) |>
     summarise(income_ist = sum(actual_income, na.rm = TRUE), .groups = "drop")
 
   kostenstelle_income <- planned_income_m |>
-    filter(id %in% kostenstelle_ids) |>
+    filter(id %in% c(kostenstelle_ids, startup_ids), !id %in% exclude_all) |>
     group_by(month) |>
     summarise(kostenstelle_income = sum(planned_income, na.rm = TRUE), .groups = "drop")
 
@@ -1256,27 +1260,9 @@ make_forecast_plot <- function(d, burn_window_months = 6,
 
   end_balance   <- last(ts_future$balance)
   end_month     <- last(ts_future$month)
-  # Startup is excluded from the forecast, but its remaining saldo (planned
-  # income minus spending to date — same convention as the Monitoring header)
-  # is still spendable money, so show the end balance including it as well.
-  startup_saldo <- if (length(startup_ids) > 0) {
-    startup_income <- planned_income_m |>
-      filter(id %in% startup_ids, month <= today_month) |>
-      summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
-    startup_spent  <- ist_monthly |>
-      filter(id %in% startup_ids, month <= today_month) |>
-      summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
-    startup_income - startup_spent
-  } else 0
-  end_incl_startup <- end_balance + startup_saldo
   end_label     <- paste0(if (end_balance >= 0) "Expected: +" else "Expected: ",
                           format(round(end_balance), big.mark = "'"),
-                          " CHF\nat end of horizon (", format(end_month, "%b %Y"), ")",
-                          if (length(startup_ids) > 0) paste0(
-                            "\nincl. Startup saldo: ",
-                            if (end_incl_startup >= 0) "+" else "",
-                            format(round(end_incl_startup), big.mark = "'"), " CHF")
-                          else "")
+                          " CHF\nat end of horizon (", format(end_month, "%b %Y"), ")")
   end_label_df  <- tibble(month = end_month, value = end_balance,
                            label = end_label,
                            panel = factor("Balance", levels = c("Cashflow","Balance")))
@@ -1312,7 +1298,7 @@ make_forecast_plot <- function(d, burn_window_months = 6,
                  expand = expansion(mult = c(0.01, 0.02))) +
     geom_text(data = year_label_df, aes(x = month, y = value, label = label),
               inherit.aes = FALSE, size = 3) +
-    labs(title    = "Total Forecast (excl. Startup)",
+    labs(title    = "Total Forecast",
          subtitle = subtitle,
          x = "Month", y = "CHF", fill = "Bars", linetype = "Lines") +
     theme_bw() +
@@ -1353,18 +1339,16 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
   ist_psp <- ist_monthly |> filter(id == psp_id)
 
   if (planned_funded) {
-    past_income <- planned_income_m |> filter(id == psp_id, month <= today_month) |>
-      rename(total_income = planned_income)
-    # Kostenstelle: EP credits (negative bookings) are real income on top of
-    # the ZP budget — count them, same as everywhere else.
-    if (psp_id %in% kostenstelle_ids) {
-      past_income <- bind_rows(
-        past_income,
-        ist_psp |> filter(month <= today_month, actual_income > 0) |>
-          select(month, total_income = actual_income)) |>
-        group_by(month) |>
-        summarise(total_income = sum(total_income, na.rm = TRUE), .groups = "drop")
-    }
+    # Kostenstelle and Startup: the ZP figure is the allocation (never an EP
+    # income row) and EP income rows (credits, reimbursements) are real money
+    # on top of it — count both, same as everywhere else.
+    past_income <- bind_rows(
+      planned_income_m |> filter(id == psp_id, month <= today_month) |>
+        select(month, total_income = planned_income),
+      ist_psp |> filter(month <= today_month, actual_income != 0) |>
+        select(month, total_income = actual_income)) |>
+      group_by(month) |>
+      summarise(total_income = sum(total_income, na.rm = TRUE), .groups = "drop")
   } else {
     past_income <- ist_psp |> filter(month <= today_month) |>
       select(month, total_income = actual_income)
@@ -1901,7 +1885,7 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
            "(credits) netted in. 'Salary' is the booked employer cost incl. social contributions. ",
            "'EPIC' is the animal facility, 'FACS'/'ScopeM' are core facilities. ",
            "'Transfer Forschungsreserve' is the year-end move of unspent Kostenstelle money into ",
-           "the Reserve — a transfer, not consumption. Startup money is excluded from the ",
+           "the Reserve — a transfer, not consumption. Equipment is excluded from the ",
            "consumables-per-FTE rate."), "",
     sec("1. Accounts", handover_md_table(konten_tbl)),
     sec("2. Spending by category and year (all kontos)", handover_md_table(cat_year)),
@@ -1913,7 +1897,7 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
         c(handover_md_table(last_w), "",
           if (!is.null(rate)) c(
             paste0("- Average FTE in the salary plan over the window: **", round(rate$past_fte, 2), "**"),
-            paste0("- Non-salary, non-EPIC spend in the window (excl. Startup, excl. Reserve transfer): **",
+            paste0("- Non-salary, non-EPIC spend in the window (excl. Equipment, excl. Reserve transfer): **",
                    handover_fmt(rate$nonsalary_total), "**"),
             paste0("- Consumables rate: **", handover_fmt(rate$per_fte_month), " CHF per FTE per month** = **",
                    handover_fmt(rate$per_fte_month * 12), " CHF per FTE per year**")),
@@ -2377,9 +2361,13 @@ server <- function(input, output, session) {
         filter(id == psp_id, year(month) == cur_year) |>
         summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
     } else if (psp_id %in% startup_ids) {
-      income_so_far <- d$planned_income_m |>
+      # ZP allocation + EP income rows (reimbursements), as in the plots
+      income_so_far <- (d$planned_income_m |>
         filter(id == psp_id, month <= today_month) |>
-        summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+        summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)) +
+        (d$ist_monthly |>
+        filter(id == psp_id, month <= today_month) |>
+        summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v))
     } else {
       income_so_far <- d$ist_monthly |>
         filter(id == psp_id, month <= today_month) |>
@@ -2416,7 +2404,7 @@ server <- function(input, output, session) {
     konten       <- d$konten
     kostenstelle_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
     startup_ids      <- konten |> filter(typ == "Startup")      |> pull(id)
-    exclude_all      <- startup_ids   # Erlöse revenue counts in the totals
+    exclude_all      <- character()   # everything counts, incl. Startup and Erlöse
 
     cur_year <- year(today_month)
 
@@ -2446,14 +2434,17 @@ server <- function(input, output, session) {
     pct_spent <- if (budget_total > 0) round(100 * ist_total / budget_total, 1) else NA_real_
 
     # Balance: Kostenstelle current year (ZP budget; credits already netted
-    # into IST); Startup planned; others actual income
+    # into IST); Startup ZP allocation to date + EP income; others actual income
     income_kost <- d$planned_income_m |>
       filter(id %in% kostenstelle_ids, year(month) == cur_year) |>
+      summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
+    income_startup <- d$planned_income_m |>
+      filter(id %in% startup_ids, month <= today_month) |>
       summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
     income_actual <- d$ist_monthly |>
       filter(!id %in% c(kostenstelle_ids, exclude_all), month <= today_month) |>
       summarise(v = sum(actual_income, na.rm = TRUE)) |> pull(v)
-    balance <- (income_kost + income_actual) - ist_total
+    balance <- (income_kost + income_startup + income_actual) - ist_total
 
     # FTE in current month across all PSPs
     fte_now <- NA_real_
@@ -2468,7 +2459,7 @@ server <- function(input, output, session) {
       style = "display:flex; gap:2rem; padding:0.5rem 1rem; background:#f8f9fa;
                border-radius:6px; margin-bottom:0.5rem; flex-wrap:wrap; font-size:0.9rem;",
       tags$span(tags$b("Data up to: "), format(today_month, "%Y-%m")),
-      tags$span(tags$b("Budget total: "), paste0(fmt_chf(budget_total), " CHF (excl. Startup)")),
+      tags$span(tags$b("Budget total: "), paste0(fmt_chf(budget_total), " CHF")),
       tags$span(tags$b("IST: "),          paste0(fmt_chf(ist_total),    " CHF")),
       tags$span(tags$b("Budget-IST: "),   if (!is.na(pct_spent)) paste0(fmt_chf(budget_total - ist_total), " CHF (", pct_spent, "% spent)") else "—"),
       tags$span(tags$b("Balance: "),      paste0(fmt_chf(balance),      " CHF")),
@@ -2498,19 +2489,19 @@ server <- function(input, output, session) {
     startup_ids      <- konten |> filter(typ == "Startup")      |> pull(id)
     kostenstelle_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
     reserve_ids      <- konten |> filter(typ == "Reserve")      |> pull(id)
-    exclude_all      <- startup_ids   # Erlöse revenue counts in the totals
+    exclude_all      <- character()   # everything counts, incl. Startup and Erlöse
 
     ist_ns <- ist_monthly |> filter(!id %in% exclude_all)
 
     # Same scope as make_forecast_plot: EP income of ALL accounts (so the
-    # mirrored Reserve transfer nets to zero) + ZP budget of the Kostenstelle
-    # only (Reserve ZP entries would double-count the EP booking).
+    # mirrored Reserve transfer nets to zero) + ZP allocations of Kostenstelle
+    # and Startup (Reserve ZP entries would double-count the EP booking).
     past_income_ist <- ist_ns |>
       group_by(month) |>
       summarise(income = sum(actual_income, na.rm = TRUE), .groups = "drop")
 
     kostenstelle_income <- planned_income_m |>
-      filter(id %in% kostenstelle_ids, month <= today_month) |>
+      filter(id %in% c(kostenstelle_ids, startup_ids), month <= today_month) |>
       group_by(month) |>
       summarise(kost_income = sum(planned_income, na.rm = TRUE), .groups = "drop")
 
@@ -2562,7 +2553,7 @@ server <- function(input, output, session) {
       scale_x_date(date_breaks = "1 month", date_labels = "%b",
                    expand = expansion(mult = c(0.01, 0.02))) +
       scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
-      labs(title = paste0("Monitoring: All PSPs (excl. Startup)
+      labs(title = paste0("Monitoring: All PSPs
 Data up to: ",
                           format(today_month, "%Y-%m"), " | Balance: ",
                           format(round(last(ts$balance)), big.mark = "'"), " CHF"),

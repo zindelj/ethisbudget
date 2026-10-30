@@ -34,6 +34,18 @@ Place an SAP export named **`export_YYYYMMDD_HHMMSS.xlsx`** (e.g. `export_202605
 |------|---------|
 | `Lohntabelle.xlsx` | Salary rates by role/year — enables PhD/Postdoc auto-fill in Salary Plan |
 
+## Konto types (`Typ` column in Konten.xlsx)
+
+| Typ | Income comes from | Notes |
+|---|---|---|
+| `Grant` | EP income rows (tranches actually booked); Zahlungsplan tranches only count in the *future* | SNF, foundations, industry — anything that pays into the account |
+| `Startup` | Zahlungsplan figure on its date **plus** any EP income rows | ETH-allocated money that never appears as an EP income row: the Startup itself, ETH Research Grants, vouchers. Enter the SAP figure as one Zahlungsplan row dated at the start — no made-up installments |
+| `Kostenstelle` | Zahlungsplan budget per calendar year plus EP credits | Year-scoped headers, year-end sweep into the Reserve |
+| `Reserve` | EP income (the year-end transfer) | Zahlungsplan entries ignored |
+| `Erlöse` | — | Revenue PSP element of the Kostenstelle; netted into the K header like SAP |
+
+All types count in Forecast (Total), the All-PSPs monitoring and the headers. The consumables-per-FTE rate excludes Salary, EPIC, **Equipment** and the Reserve transfer.
+
 ## Tabs
 
 | Tab | What it does |

@@ -8,7 +8,8 @@ exprs <- parse("app.R")
 want  <- c("%||%", "safe_max_date", "canonical_id", "mirror_reserve_transfers",
            "resolve_ep_id_aliases", "INCOME_KURZTEXT_PATTERN",
            "SIGN_INCOME_KURZTEXT_PATTERN", "is_income_row", "storno_is_income",
-           "consumables_per_fte_month", "epic_monthly_avg", "compute_salary_cost",
+           "CONSUMABLES_RATE_EXCLUDED_CATEGORIES", "consumables_per_fte_month",
+           "epic_monthly_avg", "compute_salary_cost",
            "interpolate_balance", "make_forecast_plot", "make_psp_forecast_plot")
 for (e in exprs) {
   if (is.call(e) && as.character(e[[1]]) %in% c("<-", "=")) {
@@ -105,8 +106,9 @@ d3$ist_raw <- bind_rows(d3$ist_raw,
 r3 <- consumables_per_fte_month(d3, 6)
 ok("Reserve transfer excluded from consumables rate", abs(r3$per_fte_month - r$per_fte_month) < 1e-6)
 
-# 8. end-of-horizon label: with a Startup account, a second line shows the
-#    balance incl. the Startup saldo (planned income - spending to date).
+# 8. Startup accounts are ETH-allocated money: the ZP figure on its date plus
+#    EP income counts as income, and they are IN the total forecast like any
+#    grant (the end balance moves by planned - spent; no separate saldo line).
 lab_of <- function(p) {
   labs <- unlist(lapply(ggplot_build(p)$data,
                         function(df) if ("label" %in% names(df)) as.character(df$label) else NULL))
@@ -122,11 +124,15 @@ d4$ist_monthly <- bind_rows(d4$ist_monthly,
   tibble(id = "S1", month = as_date("2026-03-01"), actual_income = 0, actual_spending = 30000))
 p4 <- make_forecast_plot(d4, 6, inflation_rate = 0, consumables_rate_month = 1200, epic_monthly = 1500)
 lab1 <- lab_of(p1); lab4 <- lab_of(p4)
-ok("no Startup account = no Startup line in label", !grepl("Startup", lab1))
-ok("Startup account adds incl.-Startup line",       grepl("incl. Startup saldo", lab4))
-line_incl <- strsplit(lab4, "\n")[[1]] |> (\(x) x[grepl("Startup", x)])()
-ok("incl.-Startup = expected + saldo (80000-30000)",
-   abs(num_in(line_incl) - (num_in(lab1) + 50000)) < 1)
+ok("no separate Startup saldo line any more", !grepl("Startup", lab4))
+ok("Startup in total forecast: expected = base + (80000 - 30000)",
+   abs(num_in(lab4) - (num_in(lab1) + 50000)) < 1)
+d4b <- d4
+d4b$ist_monthly <- bind_rows(d4b$ist_monthly,
+  tibble(id = "S1", month = as_date("2026-04-01"), actual_income = 7000, actual_spending = 0))
+lab4b <- lab_of(make_forecast_plot(d4b, 6, inflation_rate = 0, consumables_rate_month = 1200, epic_monthly = 1500))
+ok("Startup EP income (reimbursement) counts on top of the ZP figure",
+   abs(num_in(lab4b) - (num_in(lab4) + 7000)) < 1)
 
 # 9. Year-end settlement: SAP books it only as income on the Reserve; the
 #    Kostenstelle side must be mirrored as expenditure, and the whole lateral
@@ -233,3 +239,11 @@ ok("tranche + flagged pair: all income, net income = tranche",
    sum(ifelse(e_inc, 0, e$betrag_in_bw)) == 0)
 # no is_storno column at all -> plain rule
 ok("no Storno column -> plain rule", identical(storno_is_income(mk("G", K, -5, FALSE)[, -4]), TRUE))
+
+# ---- Equipment is excluded from the consumables rate -----------------------
+d9 <- d
+d9$ist_raw <- bind_rows(d9$ist_raw,
+  tibble(id = "K1", month = as_date("2026-05-01"), category = "Equipment",
+         actual_spending = 500000, actual_income = 0))
+r9 <- consumables_per_fte_month(d9, 6)
+ok("Equipment excluded from consumables rate", abs(r9$per_fte_month - r$per_fte_month) < 1e-6)
