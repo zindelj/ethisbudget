@@ -209,3 +209,16 @@ d8$ist_raw <- bind_rows(d8$ist_raw,
          actual_spending = -1000, actual_income = 0))
 r8 <- consumables_per_fte_month(d8, 6)
 ok("Gutschrift nets consumables rate (11000/9)", abs(r8$per_fte_month - 11000/9) < 1e-6)
+
+# ---- Storno: a reversal is classified with its sign flipped ----------------
+# Cancelled outgoing invoice (Kostenübernahme): original -150k = income, the
+# Storno +150k must be NEGATIVE INCOME, not an internal charge.
+st_amt <- c(-150000, 150000); st_storno <- c(FALSE, TRUE)
+st_inc <- is_income_row(rep("Kostenübernahme", 2), ifelse(st_storno, -st_amt, st_amt))
+ok("Storno of outgoing invoice = income side", all(st_inc))
+ok("Storno nets income to zero", sum(ifelse(st_inc, -st_amt, 0)) == 0)
+ok("Storno adds no spending",    sum(ifelse(st_inc, 0, st_amt)) == 0)
+# Cancelled incoming charge: original +25k spending, Storno -25k = negative spending
+st_amt2 <- c(25000, -25000)
+st_inc2 <- is_income_row(rep("Kostenübernahme", 2), ifelse(st_storno, -st_amt2, st_amt2))
+ok("Storno of a real charge stays spending side", !any(st_inc2))

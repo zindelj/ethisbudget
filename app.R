@@ -462,21 +462,19 @@ mirror_reserve_transfers <- function(ist_raw, konten) {
 # still counted (SAP's Ist counts it too), so make it visible per konto and
 # category instead of letting it inflate a category silently.
 storno_health <- function(ist_raw) {
-  paid_col <- grep("^bezahlt", names(ist_raw), value = TRUE)[1]
-  if (is.na(paid_col)) return(character())
-  st <- ist_raw |>
-    filter(str_detect(tolower(as.character(.data[[paid_col]])), "storno"),
-           !is.na(id))
+  if (!"is_storno" %in% names(ist_raw)) return(character())
+  st <- ist_raw |> filter(is_storno, !is.na(id))
   if (nrow(st) == 0) return(character())
   per <- st |>
-    group_by(id, category) |>
-    summarise(n = n(), chf = sum(betrag_in_bw, na.rm = TRUE), .groups = "drop") |>
+    mutate(side = if_else(is_inc, "income", category)) |>
+    group_by(id, side) |>
+    summarise(chf = sum(betrag_in_bw, na.rm = TRUE), .groups = "drop") |>
     arrange(desc(abs(chf)))
-  paste0("Einzelposten: ", nrow(st), " booking(s) marked 'Storno' in '", paid_col,
-         "' (", paste0(per$id, " ", per$category, ": ",
-                       format(round(per$chf), big.mark = "'"), " CHF", collapse = "; "),
-         ") — cancelled invoices still count in spending (as in SAP's Ist) until ",
-         "the reversal is posted. Check whether a matching credit exists.")
+  paste0("Einzelposten: ", nrow(st), " 'Storno' booking(s) (reversals) — treated as ",
+         "undoing the cancelled row: ",
+         paste0(per$id, " ", per$side, " ", format(round(per$chf), big.mark = "'"),
+                " CHF", collapse = "; "),
+         ". The original and its Storno net to zero; the corrected booking will count when posted.")
 }
 
 # ================================================================
@@ -496,6 +494,12 @@ load_all_data <- function(ep_path) {
     if (length(amt_col) == 1) ist_raw <- rename(ist_raw, betrag_in_bw = !!amt_col)
   }
   if (!"buchungstext" %in% names(ist_raw)) ist_raw$buchungstext <- NA_character_
+  # "Storno" in the Bezahlt-am column marks a reversal: it undoes the row it
+  # cancels, so it is classified as if its sign were flipped (a cancelled
+  # outgoing invoice is negative income, not an internal charge).
+  paid_col <- grep("^bezahlt", names(ist_raw), value = TRUE)[1]
+  ist_raw$is_storno <- if (is.na(paid_col)) FALSE else
+    coalesce(str_detect(tolower(as.character(ist_raw[[paid_col]])), "storno"), FALSE)
   ist_raw <- ist_raw |>
     mutate(
       buch_dat     = as_date(buch_dat),
@@ -506,7 +510,7 @@ load_all_data <- function(ep_path) {
       # EVERYTHING else keeps its sign in actual_spending, so Gutschriften
       # net the IST exactly like SAP's Ist column. A positive amount on an
       # income Kurztext (e.g. repayment to SNF) becomes negative income.
-      is_inc          = is_income_row(kurztext, betrag_in_bw),
+      is_inc          = is_income_row(kurztext, if_else(is_storno, -betrag_in_bw, betrag_in_bw)),
       actual_income   = if_else(is_inc, -betrag_in_bw, 0),
       actual_spending = if_else(is_inc, 0, betrag_in_bw),
       category        = classify_category(kurztext, buchungstext)
