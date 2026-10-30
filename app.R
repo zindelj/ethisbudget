@@ -501,6 +501,30 @@ storno_health <- function(ist_raw) {
 }
 
 # ================================================================
+# Facility-costs fallback report
+# ================================================================
+# "ILV TPF bud.r.Ko-Ver" bookings are split into FACS / EPIC / ScopeM by
+# Buchungstext; anything unmatched lands in "Facility costs". List those
+# Buchungstexte with their totals so new EPIC/FACS/ScopeM services can be
+# added to CATEGORY_RULES instead of silently piling up in the fallback.
+facility_fallback_health <- function(ist_raw) {
+  fb <- ist_raw |>
+    filter(category == "Facility costs", !is.na(id)) |>
+    mutate(bt = coalesce(str_squish(buchungstext), "(empty)")) |>
+    group_by(bt) |>
+    summarise(n = n(), chf = sum(actual_spending, na.rm = TRUE), .groups = "drop") |>
+    arrange(desc(abs(chf)))
+  if (nrow(fb) == 0) return(character())
+  shown <- head(fb, 12)
+  paste0("Facility costs: ", sum(fb$n), " booking(s) (", format(round(sum(fb$chf)), big.mark = "'"),
+         " CHF) have a Buchungstext not mapped to FACS/EPIC/ScopeM: ",
+         paste0("'", shown$bt, "' ", shown$n, "x ", format(round(shown$chf), big.mark = "'"),
+                collapse = "; "),
+         if (nrow(fb) > nrow(shown)) paste0("; … ", nrow(fb) - nrow(shown), " more") else "",
+         ". Tell Claude which of these are EPIC (animal facility) to extend CATEGORY_RULES.")
+}
+
+# ================================================================
 # Verantwortungsbereich (VB) filter
 # ================================================================
 # A PSP can be shared between Verantwortungsbereiche: the EP export of the
@@ -837,7 +861,7 @@ load_all_data <- function(ep_path) {
   # Collected here and surfaced on the Load Data tab so silent data loss
   # becomes visible instead of quietly skewing forecasts.
   health <- c(ep_health, aliased$notes, vb_filtered$notes, zp_health, attr(salary_plan, "health"),
-              mirrored_transfers$notes, storno_health(ist_raw))
+              mirrored_transfers$notes, storno_health(ist_raw), facility_fallback_health(ist_raw))
 
   zp_unmatched <- setdiff(unique(zahlungsplan$id), konten$id)
   if (length(zp_unmatched) > 0)
@@ -1019,7 +1043,7 @@ make_psp_plot <- function(psp_id, d) {
           axis.text.x = element_text(size = 6, angle = 90, vjust = 0.5, hjust = 1),
           legend.position = "bottom")
 
-  gridExtra::grid.arrange(p_income, p_spending, p_balance, ncol = 1, heights = c(1, 1, 1))
+  gridExtra::grid.arrange(p_income, p_spending, p_balance, ncol = 1, heights = c(1, 2, 1))
 }
 
 # ================================================================
@@ -2078,7 +2102,7 @@ ui <- page_navbar(
       ),
       tagList(
         uiOutput("header_monitoring_psp"),
-        card(plotOutput("plot_monitoring", height = "900px"))
+        card(plotOutput("plot_monitoring", height = "1050px"))
       )
     )
   ),
@@ -2086,7 +2110,9 @@ ui <- page_navbar(
   nav_panel("📊 Monitoring (All PSPs)",
     tagList(
       uiOutput("header_monitoring_all"),
-      card(plotOutput("plot_monitoring_all", height = "900px"))
+      checkboxInput("mon_all_startup", "Include Startup / Voucher accounts (untick to see the grant categories without the Startup equipment)",
+                    value = TRUE, width = "100%"),
+      card(plotOutput("plot_monitoring_all", height = "1050px"))
     )
   ),
 
@@ -2465,7 +2491,7 @@ server <- function(input, output, session) {
     konten       <- d$konten
     kostenstelle_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
     startup_ids      <- konten |> filter(typ == "Startup")      |> pull(id)
-    exclude_all      <- character()   # everything counts, incl. Startup and Erlöse
+    exclude_all      <- if (isTRUE(input$mon_all_startup %||% TRUE)) character() else startup_ids
 
     cur_year <- year(today_month)
 
@@ -2550,7 +2576,7 @@ server <- function(input, output, session) {
     startup_ids      <- konten |> filter(typ == "Startup")      |> pull(id)
     kostenstelle_ids <- konten |> filter(typ == "Kostenstelle") |> pull(id)
     reserve_ids      <- konten |> filter(typ == "Reserve")      |> pull(id)
-    exclude_all      <- character()   # everything counts, incl. Startup and Erlöse
+    exclude_all      <- if (isTRUE(input$mon_all_startup %||% TRUE)) character() else startup_ids
 
     ist_ns <- ist_monthly |> filter(!id %in% exclude_all)
 
@@ -2614,7 +2640,7 @@ server <- function(input, output, session) {
       scale_x_date(date_breaks = "1 month", date_labels = "%b",
                    expand = expansion(mult = c(0.01, 0.02))) +
       scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
-      labs(title = paste0("Monitoring: All PSPs
+      labs(title = paste0("Monitoring: All PSPs", if (length(exclude_all) > 0) " (excl. Startup)" else "", "
 Data up to: ",
                           format(today_month, "%Y-%m"), " | Balance: ",
                           format(round(last(ts$balance)), big.mark = "'"), " CHF"),
@@ -2654,7 +2680,7 @@ Data up to: ",
             axis.text.x = element_text(size = 6, angle = 90, vjust = 0.5, hjust = 1),
             legend.position = "bottom")
 
-    gridExtra::grid.arrange(p_income, p_spending, p_balance, ncol = 1, heights = c(1, 1, 1))
+    gridExtra::grid.arrange(p_income, p_spending, p_balance, ncol = 1, heights = c(1, 2, 1))
   })
 
   output$ui_psp_select_fc <- renderUI({
