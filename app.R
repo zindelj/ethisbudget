@@ -233,7 +233,7 @@ CATEGORY_RULES <- tibble::tribble(
   "Halb-&Fertigpdt.Komp",    NA,                           "Consumables",
   "Labortiere/Tierhaltg",    "^Mouse Breeding Taconic$",   "Taconic",
   "Labortiere/Tierhaltg",    "^Weiterbelastung",           "Animal purchase",
-  "Labortiere/Tierhaltg",    NA,                           "Consumables",
+  "Labortiere/Tierhaltg",    NA,                           "EPIC",
 
   # Equipment
   "Maschinen, Geräte",       NA,                           "Equipment",
@@ -270,6 +270,7 @@ CATEGORY_RULES <- tibble::tribble(
   "ILV TPF bud.r.Ko-Ver",    "^Staff Support ASS$",        "Salary",
   "ILV TPF bud.r.Ko-Ver",    "^Staff Support FACS$",       "FACS",
   "ILV TPF bud.r.Ko-Ver",    "^high-end analyzer$",        "FACS",
+  "ILV TPF bud.r.Ko-Ver",    "^low-end analyzer$",         "FACS",
   "ILV TPF bud.r.Ko-Ver",    "^Confocal$",                 "ScopeM",
   "ILV TPF bud.r.Ko-Ver",    "^Staff$",                    "ScopeM",
   "ILV TPF bud.r.Ko-Ver",    "^Sample Preparation Tool$",  "ScopeM",
@@ -278,7 +279,19 @@ CATEGORY_RULES <- tibble::tribble(
   "ILV TPF bud.r.Ko-Ver",    "^In Vitro Fertilisation$",   "EPIC",
   "ILV TPF bud.r.Ko-Ver",    "^Embryotransfer$",           "EPIC",
   "ILV TPF bud.r.Ko-Ver",    "^Staff Support 1: Import$",  "EPIC",
+  "ILV TPF bud.r.Ko-Ver",    "^Staff Support 1: Export$",  "EPIC",
+  "ILV TPF bud.r.Ko-Ver",    "^Staff Support Import$",     "EPIC",
   "ILV TPF bud.r.Ko-Ver",    "^Medikamente HPL$",          "EPIC",
+  # FGCZ (Functional Genomics Center Zurich): sequencing services + reagents
+  "ILV TPF bud.r.Ko-Ver",    "^10X Genomics",              "Genomics (FGCZ)",
+  "ILV TPF bud.r.Ko-Ver",    "^Illumina",                  "Genomics (FGCZ)",
+  "ILV TPF bud.r.Ko-Ver",    "^Agilent Technologies",      "Genomics (FGCZ)",
+  "ILV TPF bud.r.Ko-Ver",    "^Single cell processing$",   "Genomics (FGCZ)",
+  "ILV TPF bud.r.Ko-Ver",    "Sequencing processing$",     "Genomics (FGCZ)",
+  "ILV TPF bud.r.Ko-Ver",    "^Seq - Data processing$",    "Genomics (FGCZ)",
+  "ILV TPF bud.r.Ko-Ver",    "^Genomics Support",          "Genomics (FGCZ)",
+  "ILV TPF bud.r.Ko-Ver",    "^Bioinformatics Support",    "Genomics (FGCZ)",
+  "ILV TPF bud.r.Ko-Ver",    "^Panel development support$","Genomics (FGCZ)",
   "ILV TPF bud.r.Ko-Ver",    NA,                           "Facility costs",
 
   # Internal charges
@@ -334,6 +347,7 @@ CATEGORY_COLORS <- c(
   "FACS"                      = "#F39B7F",  # NPG peach
   "EPIC"                      = "#EFC000",  # JCO gold
   "ScopeM"                    = "#4DBBD5",  # NPG cyan
+  "Genomics (FGCZ)"           = "#3C5488",  # NPG navy
   "Facility costs"            = "#5F9EA0",  # cadet blue (residual)
   "Internal charges"          = "#828282",  # gray
   "Transfer Forschungsreserve"= "#E377C2",  # D3 pink — deliberately loud: money moved, not spent
@@ -342,7 +356,7 @@ CATEGORY_COLORS <- c(
 
 CATEGORY_ORDER <- c("Salary","Consumables","Taconic","Animal purchase","Equipment",
                     "IT, Office & Publications","Travel, Events & Training",
-                    "FACS","EPIC","ScopeM","Facility costs",
+                    "FACS","EPIC","ScopeM","Genomics (FGCZ)","Facility costs",
                     "Internal charges","Transfer Forschungsreserve","Other")
 
 # ================================================================
@@ -503,7 +517,7 @@ storno_health <- function(ist_raw) {
 # ================================================================
 # Facility-costs fallback report
 # ================================================================
-# "ILV TPF bud.r.Ko-Ver" bookings are split into FACS / EPIC / ScopeM by
+# "ILV TPF bud.r.Ko-Ver" bookings are split into FACS / EPIC / ScopeM / Genomics by
 # Buchungstext; anything unmatched lands in "Facility costs". List those
 # Buchungstexte with their totals so new EPIC/FACS/ScopeM services can be
 # added to CATEGORY_RULES instead of silently piling up in the fallback.
@@ -517,11 +531,11 @@ facility_fallback_health <- function(ist_raw) {
   if (nrow(fb) == 0) return(character())
   shown <- head(fb, 12)
   paste0("Facility costs: ", sum(fb$n), " booking(s) (", format(round(sum(fb$chf)), big.mark = "'"),
-         " CHF) have a Buchungstext not mapped to FACS/EPIC/ScopeM: ",
+         " CHF) have a Buchungstext not mapped to FACS/EPIC/ScopeM/Genomics: ",
          paste0("'", shown$bt, "' ", shown$n, "x ", format(round(shown$chf), big.mark = "'"),
                 collapse = "; "),
          if (nrow(fb) > nrow(shown)) paste0("; … ", nrow(fb) - nrow(shown), " more") else "",
-         ". Tell Claude which of these are EPIC (animal facility) to extend CATEGORY_RULES.")
+         ".")
 }
 
 # ================================================================
