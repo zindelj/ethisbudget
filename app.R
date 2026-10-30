@@ -488,14 +488,24 @@ load_all_data <- function(ep_path) {
     )
 
   # EP rows without a parseable date, amount or account are invisible to every
-  # sum and plot — report them instead of losing them silently.
-  ep_bad <- ist_raw |> filter(is.na(month) | is.na(betrag_in_bw) | is.na(id))
-  ep_health <- if (nrow(ep_bad) > 0) paste0(
-    "Einzelposten: ", nrow(ep_bad), " row(s) IGNORED — missing/unparseable ",
-    "Buch_Dat, Betrag or Kontierung (first: Kurztext='", ep_bad$kurztext[1],
-    "', Buch_Dat='", as.character(ep_bad$buch_dat[1]),
-    "', Betrag='", ep_bad$betrag_in_bw[1], "'). These rows are in the export ",
-    "but count in NO total or plot.") else character()
+  # sum and plot — report them instead of losing them silently. The SAP export
+  # ends with a summary block (node totals: amount only, no date, Kurztext or
+  # Kontierung); those are not bookings and only get a mild note.
+  ep_bad    <- ist_raw |> filter(is.na(month) | is.na(betrag_in_bw) | is.na(id))
+  ep_footer <- ep_bad |> filter(is.na(buch_dat), is.na(id),
+                                is.na(kurztext) | str_trim(kurztext) == "")
+  ep_bad    <- ep_bad |> anti_join(ep_footer, by = names(ep_bad))
+  ep_health <- c(
+    if (nrow(ep_footer) > 0) paste0(
+      "Einzelposten: ", nrow(ep_footer), " summary row(s) at the end of the ",
+      "export skipped (SAP node totals: amount only, no date/Kurztext/Kontierung; ",
+      "first Betrag='", ep_footer$betrag_in_bw[1], "'). Not bookings — nothing is lost."),
+    if (nrow(ep_bad) > 0) paste0(
+      "Einzelposten: ", nrow(ep_bad), " row(s) IGNORED — missing/unparseable ",
+      "Buch_Dat, Betrag or Kontierung (first: Kurztext='", ep_bad$kurztext[1],
+      "', Buch_Dat='", as.character(ep_bad$buch_dat[1]),
+      "', Betrag='", ep_bad$betrag_in_bw[1], "'). These rows are in the export ",
+      "but count in NO total or plot."))
   ist_raw <- ist_raw |> filter(!is.na(month), !is.na(betrag_in_bw), !is.na(id))
 
   ep_ids <- sort(unique(ist_raw$id[!is.na(ist_raw$id)]))
