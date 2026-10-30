@@ -51,7 +51,7 @@ load_salaryplan <- function(path) {
         raw_chf   <- as.character(df[[chf_col]])
         tib <- tibble(
           name   = nm,
-          month  = suppressWarnings(as_date(raw_month)),
+          month  = parse_any_date(raw_month),
           amount = suppressWarnings(as.numeric(str_remove_all(raw_chf, "[, ]"))),
           psp    = psp_vals,
           role   = role_vals,
@@ -63,7 +63,7 @@ load_salaryplan <- function(path) {
         notes <- if (any(bad)) paste0(
           "Salaryplan '", nm, "': ", sum(bad), " row(s) DROPPED — unparseable ",
           "Month/CHF (first: Month='", raw_month[which(bad)[1]],
-          "', CHF='", raw_chf[which(bad)[1]], "'). Use ISO dates (2026-10-01).")
+          "', CHF='", raw_chf[which(bad)[1]], "'). Any date form works (2026-10-01, 1.10.2026, Excel date).")
         else character()
         list(data = tib |> filter(!is.na(month), !is.na(amount), amount > 0),
              notes = notes)
@@ -141,6 +141,22 @@ extract_zp_id <- function(path) {
   canonical_id(id)
 }
 
+# Excel keeps re-formatting typed dates, so a date column arrives in any mix
+# of real Date cells, ISO text, day-first text ("13.1.2026", "13/1/2026") or
+# Excel serial numbers (46327 — what a date cell becomes once its format is
+# reset to General). Accept all of them; NA only when nothing parses.
+parse_any_date <- function(x) {
+  if (inherits(x, c("Date", "POSIXt"))) return(as_date(x))
+  x   <- str_trim(as.character(x))
+  d   <- suppressWarnings(as_date(x))
+  d2  <- suppressWarnings(dmy(x))
+  ser <- suppressWarnings(as.numeric(x))
+  d[is.na(d)] <- d2[is.na(d)]
+  use_ser <- is.na(d) & !is.na(ser) & ser > 20000 & ser < 80000
+  d[use_ser] <- as_date(ser[use_ser], origin = "1899-12-30")
+  d
+}
+
 read_zahlungsplan <- function(f, dummy_date = as_date("2025-08-01")) {
   id <- extract_zp_id(f)
   df <- read_excel(f)
@@ -153,17 +169,15 @@ read_zahlungsplan <- function(f, dummy_date = as_date("2025-08-01")) {
       "': no Fällig/Betrag columns recognised — tab treated as empty.")
     return(out)
   }
-  # Dates may arrive as real Excel Date objects OR as user-typed strings in
-  # day-first format (rhandsontable displays Dates as "13/1/2026", which users
-  # then mimic when typing new rows). Try ISO first, fall back to dmy().
+  # Dates may arrive as real Excel Date objects, ISO or day-first strings
+  # (rhandsontable displays Dates as "13/1/2026", which users then mimic when
+  # typing new rows) or Excel serials — see parse_any_date().
   parsed <- df |>
     rename(date_raw = fallig) |>
     mutate(id = id,
            planned_income = parse_number(as.character(betrag),
                                          locale = locale(decimal_mark = ".", grouping_mark = ",")),
-           date_iso = suppressWarnings(as_date(date_raw)),
-           date_dmy = suppressWarnings(dmy(as.character(date_raw))),
-           date     = if_else(is.na(date_iso), date_dmy, date_iso))
+           date     = parse_any_date(date_raw))
   # a filled cell that failed to parse = silent data loss → report it
   bad <- (!is.na(parsed$date_raw) & as.character(parsed$date_raw) != "" & is.na(parsed$date)) |
          (!is.na(parsed$betrag)   & as.character(parsed$betrag)   != "" & is.na(parsed$planned_income))

@@ -5,7 +5,7 @@ suppressMessages({
 })
 
 exprs <- parse("app.R")
-want  <- c("%||%", "canonical_id", "extract_zp_id", "read_zahlungsplan", "load_salaryplan")
+want  <- c("%||%", "canonical_id", "extract_zp_id", "parse_any_date", "read_zahlungsplan", "load_salaryplan")
 for (e in exprs) {
   if (is.call(e) && as.character(e[[1]]) %in% c("<-", "=")) {
     nm <- gsub("`", "", deparse(e[[2]]))
@@ -19,8 +19,8 @@ tmp <- tempdir()
 # ---- Salaryplan with one bad date row and one skipped sheet ----------------
 sal <- file.path(tmp, "Salaryplan.xlsx")
 write_xlsx(list(
-  Anna = data.frame(Month = c("2026-08-01", "01.10.2026", "2026-09-01"),
-                    CHF = c("8000", "8000", "x8000"), PSP = "1-999999",
+  Anna = data.frame(Month = c("2026-08-01", "01.10.2026", "46266", "2026-09-01", "sometime"),
+                    CHF = c("8000", "8000", "8000", "x8000", "8000"), PSP = "1-999999",
                     Role = "PhD Student", FTE = 1),
   Ben  = data.frame(Month = c("2026-08-01"), CHF = c("5000"), PSP = "K1",
                     Role = "Postdoc", FTE = 0.5),
@@ -29,8 +29,9 @@ write_xlsx(list(
 sp <- load_salaryplan(sal)
 h  <- attr(sp, "health")
 cat("health notes:\n"); print(h)
-ok("good rows kept (Anna 1 + Ben 1)", nrow(sp) == 2)
-ok("Anna's 2 bad rows reported", any(grepl("Anna.*2 row", h)))
+ok("good rows kept (Anna ISO + dmy + serial, Ben 1)", nrow(sp) == 4)
+ok("serial 46266 -> 2026-09-01", as.character(as_date("2026-09-01")) %in% as.character(sp$month))
+ok("Anna's 2 bad rows reported (bad CHF, bad Month)", any(grepl("Anna.*2 row", h)))
 ok("Broken sheet reported", any(grepl("Broken.*skipped", h)))
 
 # ---- Zahlungsplan with a bad date -----------------------------------------
