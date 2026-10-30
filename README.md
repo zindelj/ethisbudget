@@ -39,12 +39,15 @@ Place an SAP export named **`export_YYYYMMDD_HHMMSS.xlsx`** (e.g. `export_202605
 | Typ | Income comes from | Notes |
 |---|---|---|
 | `Grant` | EP income rows (tranches actually booked); Zahlungsplan tranches only count in the *future* | SNF, foundations, industry — anything that pays into the account |
-| `Startup` | Zahlungsplan figure on its date **plus** any EP income rows | ETH-allocated money that never appears as an EP income row: the Startup itself, ETH Research Grants, vouchers. Enter the SAP figure as one Zahlungsplan row dated at the start — no made-up installments |
+| `Startup` | Zahlungsplan figure on its date **plus** any EP income rows | ETH-allocated money that never appears as an EP income row: the Startup itself, ETH Research Grants. Enter the SAP figure as one Zahlungsplan row dated at the start — no made-up installments |
+| `Voucher` | as `Startup` | Same, but the money sits in **another Verantwortungsbereich** (e.g. a departmental voucher), so its bookings are kept whatever their VB |
 | `Kostenstelle` | Zahlungsplan budget per calendar year plus EP credits | Year-scoped headers, year-end sweep into the Reserve |
 | `Reserve` | EP income (the year-end transfer) | Zahlungsplan entries ignored |
 | `Erlöse` | — | Revenue PSP element of the Kostenstelle; netted into the K header like SAP |
 
-All types count in Forecast (Total), the All-PSPs monitoring and the headers. The consumables-per-FTE rate excludes Salary, EPIC, **Equipment** and the Reserve transfer.
+All types count in Forecast (Total), the All-PSPs monitoring and the headers.
+
+**Shared PSPs / Verantwortungsbereich.** If the export has a `VB` column, the lab's own VB is read off the Kostenstelle's bookings and bookings of other VBs are dropped from every total (they are the co-applicant's share of a shared PSP; the Zahlungsplan figure and the salary plan are the lab's own share only). The dropped share is listed per konto and VB in the data-health notices. `Voucher` kontos are exempt. The consumables-per-FTE rate excludes Salary, EPIC, **Equipment** and the Reserve transfer.
 
 ## Tabs
 

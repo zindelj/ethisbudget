@@ -501,6 +501,58 @@ storno_health <- function(ist_raw) {
 }
 
 # ================================================================
+# Verantwortungsbereich (VB) filter
+# ================================================================
+# A PSP can be shared between Verantwortungsbereiche: the EP export of the
+# main applicant lists everybody's bookings on it, but the budget figure in
+# the Zahlungsplan and the people in the salary plan are the lab's own share
+# only. So bookings of other VBs are dropped — except on Voucher kontos
+# (money parked in another VB on purpose) — and the dropped share is
+# reported per konto and VB. The lab's own VB is read off the Kostenstelle's
+# bookings (there is only one Kostenstelle); rows without a VB are kept.
+filter_own_vb <- function(ist_raw, konten) {
+  none <- list(ist_raw = ist_raw, notes = character(), vb_mine = NA_character_)
+  if (!"vb" %in% names(ist_raw)) return(none)
+  vb_vals  <- str_trim(as.character(ist_raw$vb))
+  vb_vals[!is.na(vb_vals) & vb_vals %in% c("", "NA")] <- NA_character_
+  kost_ids <- konten |> filter(tolower(typ) == "kostenstelle") |> pull(id)
+  kost_vb  <- vb_vals[ist_raw$id %in% kost_ids & !is.na(vb_vals)]
+  if (length(kost_vb) == 0) {
+    none$notes <- paste0("VB: the export has a VB column but no Kostenstelle booking to ",
+                         "read the lab's own VB from — no VB filtering applied.")
+    return(none)
+  }
+  tab     <- sort(table(kost_vb), decreasing = TRUE)
+  vb_mine <- names(tab)[1]
+  notes   <- character()
+  if (length(tab) > 1) notes <- c(notes, paste0(
+    "VB: Kostenstelle bookings carry ", length(tab), " different VB values (",
+    paste0(names(tab), ": ", as.integer(tab), " rows", collapse = ", "),
+    ") — using the most frequent, '", vb_mine, "', as the lab's own VB."))
+  keep_all <- konten |> filter(coalesce(keep_all_vb, FALSE)) |> pull(id)
+  drop <- !is.na(vb_vals) & vb_vals != vb_mine &
+          !is.na(ist_raw$id) & !ist_raw$id %in% keep_all
+  if (any(drop)) {
+    per <- ist_raw[drop, ] |>
+      mutate(vb = vb_vals[drop]) |>
+      group_by(id, vb) |>
+      summarise(n = n(), income = sum(actual_income, na.rm = TRUE),
+                spending = sum(actual_spending, na.rm = TRUE), .groups = "drop") |>
+      arrange(id, vb)
+    notes <- c(notes, paste0(
+      "VB: own Verantwortungsbereich = '", vb_mine, "'. ", sum(drop),
+      " booking(s) of other VBs on shared PSPs are left out of every total and plot ",
+      "(the other VB's share, not the lab's): ",
+      paste0(per$id, " VB ", per$vb, ": ", per$n, " row(s), spending ",
+             format(round(per$spending), big.mark = "'"), ", income ",
+             format(round(per$income), big.mark = "'"), " CHF", collapse = "; "),
+      if (length(keep_all) > 0) paste0(". Voucher konto(s) ", paste(keep_all, collapse = ", "),
+                                       " keep bookings of every VB.") else "."))
+  }
+  list(ist_raw = ist_raw[!drop, ], notes = notes, vb_mine = vb_mine)
+}
+
+# ================================================================
 # Load all static data from dirname(ep_path)
 # ================================================================
 load_all_data <- function(ep_path) {
@@ -604,7 +656,12 @@ load_all_data <- function(ep_path) {
           suppressWarnings(as_date(as.numeric(laufzeit_bis), origin = "1899-12-30")),
         TRUE ~ NA_Date_
       ),
-      typ = trimws(as.character(typ))
+      typ = trimws(as.character(typ)),
+      # Voucher: ETH-allocated money that sits in ANOTHER Verantwortungs-
+      # bereich (e.g. a departmental voucher) — Startup semantics, but its
+      # bookings are kept whatever their VB (see filter_own_vb).
+      keep_all_vb = coalesce(tolower(typ) == "voucher", FALSE),
+      typ = if_else(keep_all_vb, "Startup", typ)
     ) |>
     filter(!is.na(id))
 
@@ -632,6 +689,10 @@ load_all_data <- function(ep_path) {
   aliased <- resolve_ep_id_aliases(ist_raw, konten)
   ist_raw <- aliased$ist_raw
   ep_ids  <- sort(unique(ist_raw$id[!is.na(ist_raw$id)]))
+
+  # --- Keep only bookings of the lab's own Verantwortungsbereich ---
+  vb_filtered <- filter_own_vb(ist_raw, konten)
+  ist_raw     <- vb_filtered$ist_raw
 
   # --- Mirror year-end Reserve transfers as Kostenstelle expenditure ---
   # (needs konten for the Typ lookup; must run before ist_monthly is built)
@@ -775,7 +836,7 @@ load_all_data <- function(ep_path) {
   # --- Data health: everything that was dropped or doesn't cross-match ------
   # Collected here and surfaced on the Load Data tab so silent data loss
   # becomes visible instead of quietly skewing forecasts.
-  health <- c(ep_health, aliased$notes, zp_health, attr(salary_plan, "health"),
+  health <- c(ep_health, aliased$notes, vb_filtered$notes, zp_health, attr(salary_plan, "health"),
               mirrored_transfers$notes, storno_health(ist_raw))
 
   zp_unmatched <- setdiff(unique(zahlungsplan$id), konten$id)
@@ -833,7 +894,7 @@ load_all_data <- function(ep_path) {
   if (length(typless_ids) > 0)
     health <- c(health, paste0("Konto '", typless_ids,
       "' has no Typ in Konten.xlsx — it is IGNORED everywhere until you set one ",
-      "(Grant, Kostenstelle, Startup, Reserve or Erlöse)."))
+      "(Grant, Kostenstelle, Startup, Voucher, Reserve or Erlöse)."))
 
   list(konten = konten, konten_raw = konten_raw,
        zahlungsplan = zahlungsplan_combined,

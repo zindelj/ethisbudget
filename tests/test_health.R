@@ -5,7 +5,7 @@ suppressMessages({
 })
 
 exprs <- parse("app.R")
-want  <- c("%||%", "canonical_id", "extract_zp_id", "parse_any_date", "read_zahlungsplan", "load_salaryplan")
+want  <- c("%||%", "canonical_id", "extract_zp_id", "parse_any_date", "read_zahlungsplan", "load_salaryplan", "filter_own_vb")
 for (e in exprs) {
   if (is.call(e) && as.character(e[[1]]) %in% c("<-", "=")) {
     nm <- gsub("`", "", deparse(e[[2]]))
@@ -49,3 +49,18 @@ ok("1 bad Fällig reported", any(grepl("1 row.*DROPPED", hz)))
 zp2 <- file.path(tmp, "Zahlungsplan_PSP_1-888888.xlsx")
 write_xlsx(data.frame(Fallig = "2026-10-01", Betrag = "100", Bezeichnung = "b"), zp2)
 ok("clean ZP has no health notes", length(attr(read_zahlungsplan(zp2), "health")) == 0)
+
+# ---- VB filter: other Verantwortungsbereiche dropped, Voucher exempt -------
+konten_vb <- tibble(id = c("29870", "1-0ETH", "1-0VOU", "1-0SNF"),
+                    typ = c("Kostenstelle", "Startup", "Startup", "Grant"),
+                    keep_all_vb = c(FALSE, FALSE, TRUE, FALSE))
+ist_vb <- tibble(id = c("29870", "29870", "1-0ETH", "1-0ETH", "1-0VOU", "1-0SNF", "1-0SNF"),
+                 vb = c("125", "125", "125", "124", "123", "125", NA),
+                 actual_income = c(0, 0, 0, 0, 40000, 0, 0),
+                 actual_spending = c(10, 20, 5000, 20876, 100, 300, 7))
+r_vb <- filter_own_vb(ist_vb, konten_vb)
+ok("own VB read off the Kostenstelle", identical(r_vb$vb_mine, "125"))
+ok("other-VB row on shared PSP dropped, Voucher + NA-VB rows kept", nrow(r_vb$ist_raw) == 6 &&
+     !any(r_vb$ist_raw$id == "1-0ETH" & r_vb$ist_raw$vb %in% "124"))
+ok("dropped share reported per konto/VB", any(grepl("1-0ETH VB 124.*20'876", r_vb$notes)))
+ok("no VB column = untouched", nrow(filter_own_vb(ist_vb |> select(-vb), konten_vb)$ist_raw) == 7)
