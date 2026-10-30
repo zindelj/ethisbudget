@@ -461,20 +461,43 @@ mirror_reserve_transfers <- function(ist_raw, konten) {
 # the reversal; its only trace is "Storno" in the "Bezahlt am" column. It is
 # still counted (SAP's Ist counts it too), so make it visible per konto and
 # category instead of letting it inflate a category silently.
+# Income/spending side per EP row, Storno-aware. A row flagged Storno is
+# classified like the row it cancels: its counterpart = same konto, same
+# Kurztext, opposite amount. If the counterpart is a normal row, the Storno
+# takes that row's side; if both rows of the pair are flagged (SAP marks the
+# cancelled original too) or no counterpart is found, the pair is classified
+# as its negative member would be. Either way original + Storno = 0 on ONE
+# side, so neither income nor spending (nor the consumables rate) is distorted.
+storno_is_income <- function(df) {
+  inc <- is_income_row(df$kurztext, df$betrag_in_bw)
+  st  <- if ("is_storno" %in% names(df)) coalesce(df$is_storno, FALSE) else rep(FALSE, nrow(df))
+  if (!any(st)) return(inc)
+  kt <- str_squish(df$kurztext)
+  for (i in which(st)) {
+    cp <- which(!st & df$id %in% df$id[i] & kt %in% kt[i] &
+                abs(df$betrag_in_bw + df$betrag_in_bw[i]) < 0.005)
+    ref <- if (length(cp) > 0) df$betrag_in_bw[cp[1]] else -abs(df$betrag_in_bw[i])
+    inc[i] <- is_income_row(kt[i], ref)
+  }
+  inc
+}
+
 storno_health <- function(ist_raw) {
   if (!"is_storno" %in% names(ist_raw)) return(character())
-  st <- ist_raw |> filter(is_storno, !is.na(id))
+  st <- ist_raw |> filter(coalesce(is_storno, FALSE), !is.na(id))
   if (nrow(st) == 0) return(character())
   per <- st |>
-    mutate(side = if_else(is_inc, "income", category)) |>
+    mutate(side = if_else(is_inc, "income", paste0("spending/", category))) |>
     group_by(id, side) |>
-    summarise(chf = sum(betrag_in_bw, na.rm = TRUE), .groups = "drop") |>
-    arrange(desc(abs(chf)))
-  paste0("Einzelposten: ", nrow(st), " 'Storno' booking(s) (reversals) — treated as ",
-         "undoing the cancelled row: ",
-         paste0(per$id, " ", per$side, " ", format(round(per$chf), big.mark = "'"),
-                " CHF", collapse = "; "),
-         ". The original and its Storno net to zero; the corrected booking will count when posted.")
+    summarise(n = n(), gross = sum(abs(betrag_in_bw), na.rm = TRUE),
+              net = sum(betrag_in_bw, na.rm = TRUE), .groups = "drop") |>
+    arrange(desc(gross))
+  paste0("Einzelposten: ", nrow(st), " 'Storno' row(s) — each classified like the row it cancels, ",
+         "so pairs net to zero: ",
+         paste0(per$id, " ", per$side, ": ", per$n, " row(s), net ",
+                format(round(per$net), big.mark = "'"), " CHF", collapse = "; "),
+         ". A non-zero net means the cancelled original is not in the export (or its ",
+         "Kurztext differs) — check that konto's header against SAP.")
 }
 
 # ================================================================
@@ -512,14 +535,19 @@ load_all_data <- function(ep_path) {
       betrag_in_bw = as.numeric(betrag_in_bw),
       id           = canonical_id(kontierung),
       month        = floor_date(buch_dat, "month"),
+      category        = classify_category(kurztext, buchungstext)
+    )
+  ist_raw <- ist_raw |>
+    mutate(
       # Income rows (tranches, reserve transfer) become actual_income;
       # EVERYTHING else keeps its sign in actual_spending, so Gutschriften
       # net the IST exactly like SAP's Ist column. A positive amount on an
       # income Kurztext (e.g. repayment to SNF) becomes negative income.
-      is_inc          = is_income_row(kurztext, if_else(is_storno, -betrag_in_bw, betrag_in_bw)),
+      # Storno rows take the side of the row they cancel (storno_is_income),
+      # so a cancelled booking and its reversal always net to zero on ONE side.
+      is_inc          = storno_is_income(ist_raw),
       actual_income   = if_else(is_inc, -betrag_in_bw, 0),
-      actual_spending = if_else(is_inc, 0, betrag_in_bw),
-      category        = classify_category(kurztext, buchungstext)
+      actual_spending = if_else(is_inc, 0, betrag_in_bw)
     )
 
   # EP rows without a parseable date, amount or account are invisible to every
@@ -3435,12 +3463,16 @@ Data up to: ",
     d <- rv$data
     d$salary_plan_full <- rv_sal$plan   # calibrate FTE on the full team
     rate_yr <- round(consumables_per_fte_month(d, burn_window_months)$per_fte_month * 12)
+    rate_warn <- if (is.finite(rate_yr) && rate_yr <= 0) div(class = "text-danger small",
+      "⚠ Calibrated rate ≤ 0: credits in the burn window exceed non-salary spending ",
+      "(Storno/Gutschrift). Widen the window or check the data-health notices.")
     epic_m  <- round(epic_monthly_avg(d, burn_window_months, psp_id))
     div(
       hr(),
       strong("Consumables"),
       checkboxInput(paste0("consum_on", suffix), "Include consumables",
                     value = isolate(input[[paste0("consum_on", suffix)]]) %||% TRUE),
+      rate_warn,
       numericInput(paste0("consum_rate", suffix), "CHF / FTE / year",
                    value = rate_yr, min = 0, step = 500),
       p(style="margin:-6px 0 6px;font-size:0.75em;color:#888;",

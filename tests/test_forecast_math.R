@@ -7,7 +7,7 @@ suppressMessages({
 exprs <- parse("app.R")
 want  <- c("%||%", "safe_max_date", "canonical_id", "mirror_reserve_transfers",
            "resolve_ep_id_aliases", "INCOME_KURZTEXT_PATTERN",
-           "SIGN_INCOME_KURZTEXT_PATTERN", "is_income_row",
+           "SIGN_INCOME_KURZTEXT_PATTERN", "is_income_row", "storno_is_income",
            "consumables_per_fte_month", "epic_monthly_avg", "compute_salary_cost",
            "interpolate_balance", "make_forecast_plot", "make_psp_forecast_plot")
 for (e in exprs) {
@@ -210,15 +210,26 @@ d8$ist_raw <- bind_rows(d8$ist_raw,
 r8 <- consumables_per_fte_month(d8, 6)
 ok("Gutschrift nets consumables rate (11000/9)", abs(r8$per_fte_month - 11000/9) < 1e-6)
 
-# ---- Storno: a reversal is classified with its sign flipped ----------------
-# Cancelled outgoing invoice (Kostenübernahme): original -150k = income, the
-# Storno +150k must be NEGATIVE INCOME, not an internal charge.
-st_amt <- c(-150000, 150000); st_storno <- c(FALSE, TRUE)
-st_inc <- is_income_row(rep("Kostenübernahme", 2), ifelse(st_storno, -st_amt, st_amt))
-ok("Storno of outgoing invoice = income side", all(st_inc))
-ok("Storno nets income to zero", sum(ifelse(st_inc, -st_amt, 0)) == 0)
-ok("Storno adds no spending",    sum(ifelse(st_inc, 0, st_amt)) == 0)
-# Cancelled incoming charge: original +25k spending, Storno -25k = negative spending
-st_amt2 <- c(25000, -25000)
-st_inc2 <- is_income_row(rep("Kostenübernahme", 2), ifelse(st_storno, -st_amt2, st_amt2))
-ok("Storno of a real charge stays spending side", !any(st_inc2))
+# ---- Storno: a reversal takes the side of the row it cancels --------------
+K <- "Kostenübernahme"
+mk <- function(id, kt, amt, st) tibble(id = id, kurztext = kt, betrag_in_bw = amt, is_storno = st)
+# (a) both rows flagged (SAP marks original + reversal): outgoing invoice pair
+a <- mk("G", K, c(-150000, 150000), c(TRUE, TRUE))
+ok("Storno pair both flagged -> both income",  all(storno_is_income(a)))
+# (b) only the reversal flagged: tranche-like original is income, reversal follows it
+b <- mk("G", K, c(-150000, 150000), c(FALSE, TRUE))
+ok("Storno reversal follows unflagged income original", all(storno_is_income(b)))
+# (c) reversal of a real charge received (+25k, then -25k): both spending
+c_ <- mk("G", K, c(25000, -25000), c(FALSE, TRUE))
+ok("Storno reversal follows unflagged cost original", !any(storno_is_income(c_)))
+# (d) cost Kurztext pair stays spending, nets to zero
+d_ <- mk("G", "Lohnaufwand", c(10000, -10000), c(TRUE, TRUE))
+ok("Storno cost pair both spending", !any(storno_is_income(d_)))
+# (e) unflagged rows unaffected; a third real tranche next to the pair stays income
+e <- mk("G", K, c(-150000, -150000, 150000), c(FALSE, TRUE, TRUE))
+e_inc <- storno_is_income(e)
+ok("tranche + flagged pair: all income, net income = tranche",
+   all(e_inc) && sum(ifelse(e_inc, -e$betrag_in_bw, 0)) == 150000 &&
+   sum(ifelse(e_inc, 0, e$betrag_in_bw)) == 0)
+# no is_storno column at all -> plain rule
+ok("no Storno column -> plain rule", identical(storno_is_income(mk("G", K, -5, FALSE)[, -4]), TRUE))
