@@ -516,6 +516,24 @@ storno_health <- function(ist_raw) {
 }
 
 # ================================================================
+# Health-notice severity
+# ================================================================
+# "info"  = expected, nothing to do (accepted SAP quirks the app handles)
+# "warn"  = worth a look, numbers still complete
+# "error" = data is missing or unclassifiable until fixed
+health_severity <- function(msg) {
+  vapply(msg, function(m) {
+    if (str_detect(m, "^Einzelposten: .*summary row") ||
+        str_detect(m, "^Reserve transfer mirrored") ||
+        (str_detect(m, "^VB: own Verantwortungsbereich") ) ||
+        (str_detect(m, "'Storno' row") && !str_detect(m, "net -?[1-9]")))   return("info")
+    if (str_detect(m, "IGNORED|DROPPED|failed to read|skipped: |has no Typ|NO expenditure mirrored|match(es)? no konto in Konten|no Kostenstelle booking|different VB values|treated as empty"))
+      return("error")
+    "warn"
+  }, character(1), USE.NAMES = FALSE)
+}
+
+# ================================================================
 # Facility-costs fallback report
 # ================================================================
 # "ILV TPF bud.r.Ko-Ver" bookings are split into FACS / EPIC / ScopeM / Genomics by
@@ -2567,10 +2585,15 @@ server <- function(input, output, session) {
 
   notify_health <- function() {
     h <- rv$data$health
-    if (!is.null(h) && length(h) > 0)
-      showNotification(paste0("⚠️ ", length(h),
-        " data notice(s) — details on the Load Data tab."),
-        type = "warning", duration = 8)
+    if (is.null(h) || length(h) == 0) return()
+    sev <- health_severity(h)
+    n_bad <- sum(sev != "info")
+    if (n_bad > 0)
+      showNotification(paste0("⚠️ ", n_bad, " data notice(s) need a look — details on the Load Data tab."),
+                       type = "warning", duration = 8)
+    else
+      showNotification(paste0("ℹ️ ", length(h), " informational notice(s) — details on the Load Data tab."),
+                       type = "message", duration = 5)
   }
 
   reload_data <- function() {
@@ -2655,9 +2678,18 @@ server <- function(input, output, session) {
     if (is.null(h) || length(h) == 0)
       return(div(class = "alert alert-success mt-2",
                  "✅ Data health: no dropped rows, all IDs cross-match."))
-    div(class = "alert alert-warning mt-2",
-        p(strong(paste0("⚠️ Data health — ", length(h), " notice(s):"))),
-        tags$ul(lapply(h, tags$li)))
+    sev <- health_severity(h)
+    block <- function(level, cls, title) {
+      items <- h[sev == level]
+      if (length(items) == 0) return(NULL)
+      div(class = paste("alert mt-2", cls),
+          p(strong(paste0(title, " — ", length(items), ":"))),
+          tags$ul(lapply(items, tags$li)))
+    }
+    tagList(
+      block("error", "alert-danger",  "❌ Needs fixing (data missing or unclassified)"),
+      block("warn",  "alert-warning", "⚠️ Worth a look"),
+      block("info",  "alert-success", "ℹ️ Handled as expected"))
   })
 
   output$ui_psp_select <- renderUI({
