@@ -877,6 +877,15 @@ load_all_data <- function(ep_path) {
   health <- c(ep_health, aliased$notes, vb_filtered$notes, zp_health, attr(salary_plan, "health"),
               mirrored_transfers$notes, storno_health(ist_raw), facility_fallback_health(ist_raw))
 
+  inv_past <- investments |> filter(!is.na(reference_date), month <= reference_date)
+  if (nrow(inv_past) > 0)
+    health <- c(health, paste0("Investments: ", nrow(inv_past), " planned entr",
+      if (nrow(inv_past) == 1) "y" else "ies", " dated in the past ",
+      if (nrow(inv_past) == 1) "is" else "are", " ignored by the forecast (the money is in the ",
+      "booked spending by now) — delete from Investments.xlsx: ",
+      paste0(inv_past$desc, " (", format(inv_past$month, "%Y-%m"), ", ",
+             format(round(inv_past$amount), big.mark = "'"), " CHF)", collapse = "; "), "."))
+
   zp_unmatched <- setdiff(unique(zahlungsplan$id), konten$id)
   if (length(zp_unmatched) > 0)
     health <- c(health, paste0("Zahlungsplan tab '", zp_unmatched,
@@ -1137,8 +1146,225 @@ epic_monthly_avg <- function(d, burn_window_months, psp_id = NULL) {
 # ================================================================
 # consumables_rate_month: CHF per FTE per month. NULL = auto-calibrate (the
 # same global rate the sidebar suggests); 0 = consumables toggled off.
-compute_salary_cost <- function(months_vec, d, burn_window_months, psp_id = NULL,
-                                consumables_rate_month = NULL) {
+# ================================================================
+# Burn model: fit future non-salary usage from the full history
+# ================================================================
+# Three streams, each with its own driver:
+#   EPIC      — animal-facility background cost, independent of headcount.
+#               Fitted on the CUMULATIVE series (quarterly invoices wash out)
+#               as cum = a + r*t + g/2*t^2  =>  monthly rate r + g*t with
+#               growth g per month. The forecast continues that growth for a
+#               user-set number of months, then holds flat: a still-rising
+#               series cannot identify its own plateau, the user can.
+#   Genomics  — FGCZ sequencing; planned explicitly on the Investments tab
+#               (category Sequencing/Genomics). The fitted average is only
+#               the fallback when nothing is planned, never both.
+#   Consumables + facilities (everything except Salary, EPIC, Genomics,
+#               Equipment and the Reserve transfer) — driven by headcount:
+#               spend = base + per_fte * FTE, by regression on the monthly
+#               series; falls back to the plain ratio total spend / total
+#               FTE-months when the regression is not trustworthy (fewer than
+#               6 months, no FTE variation, negative base or R² < 0.3).
+# A backtest (fit on all but the last k months, predict those) shows how well
+# each stream would have predicted the recent past.
+BURN_CONSUM_EXCLUDED <- c("Salary", "EPIC", "Genomics (FGCZ)", "Equipment", "Transfer Forschungsreserve")
+GENOMICS_INV_PATTERN <- "(?i)sequenc|genom|fgcz"
+
+burn_model_series <- function(d, fit_start) {
+  today_month <- as_date(d$reference_date)
+  fit_start   <- as_date(fit_start)
+  ist <- d$ist_raw |> filter(!is.na(month), !is.na(id), month >= fit_start, month <= today_month)
+  by_month <- function(df) df |> group_by(month) |>
+    summarise(v = sum(actual_spending, na.rm = TRUE), .groups = "drop")
+  sp  <- d$salary_plan_full %||% d$salary_plan
+  fte <- if (!is.null(sp) && nrow(sp) > 0) {
+    sp |> mutate(month = as_date(month)) |> group_by(month) |>
+      summarise(fte = sum(fte, na.rm = TRUE), .groups = "drop")
+  } else tibble(month = as_date(character()), fte = numeric())
+  tibble(month = seq(fit_start, today_month, by = "1 month")) |>
+    left_join(by_month(ist |> filter(category == "EPIC"))            |> rename(epic = v),     by = "month") |>
+    left_join(by_month(ist |> filter(category == "Genomics (FGCZ)")) |> rename(genomics = v), by = "month") |>
+    left_join(by_month(ist |> filter(!category %in% BURN_CONSUM_EXCLUDED)) |> rename(consum = v), by = "month") |>
+    left_join(fte, by = "month") |>
+    mutate(across(c(epic, genomics, consum, fte), ~ replace_na(.x, 0)),
+           t = row_number())
+}
+
+fit_epic <- function(ser) {
+  n <- nrow(ser)
+  if (n == 0) return(list(level_now = 0, slope = 0, fitted = numeric(), method = "none"))
+  if (n < 4)  return(list(level_now = mean(ser$epic), slope = 0,
+                          fitted = rep(mean(ser$epic), n), method = "mean (fewer than 4 months)"))
+  cum <- cumsum(ser$epic); t <- ser$t
+  cf  <- coef(lm(cum ~ t + I(t^2)))
+  r   <- unname(cf["t"]); g <- 2 * unname(cf["I(t^2)"])
+  list(level_now = max(r + g * n, 0), slope = g, fitted = pmax(r + g * t, 0),
+       method = "cumulative quadratic (rate = r + g·t)")
+}
+
+fit_consum <- function(ser) {
+  s <- ser |> filter(fte > 0)
+  tot_fte <- sum(s$fte)
+  out <- list(per_fte = if (tot_fte > 0) sum(s$consum) / tot_fte else 0, base = 0,
+              r2 = NA_real_, n = nrow(s), method = "ratio: total spend / total FTE-months")
+  if (nrow(s) >= 6 && sd(s$fte) > 0.05) {
+    m  <- lm(consum ~ fte, data = s); cf <- coef(m); r2 <- summary(m)$r.squared
+    out$r2 <- r2
+    if (all(is.finite(cf)) && cf[1] >= 0 && cf[2] > 0 && r2 >= 0.3) {
+      out$per_fte <- unname(cf[2]); out$base <- unname(cf[1])
+      out$method  <- "regression: spend = base + per_fte × FTE"
+    }
+  }
+  out
+}
+
+burn_backtest <- function(ser, k = 3) {
+  n <- nrow(ser)
+  if (n < k + 4) return(NULL)
+  train <- ser[seq_len(n - k), ]; test <- ser[(n - k + 1):n, ]
+  e  <- fit_epic(train);   pe <- pmax(e$level_now + e$slope * seq_len(k), 0)
+  cc <- fit_consum(train); pc <- cc$base + cc$per_fte * test$fte
+  tibble(stream    = c("EPIC", "Genomics (FGCZ)", "Consumables + facilities"),
+         predicted = c(sum(pe), mean(train$genomics) * k, sum(pc)),
+         actual    = c(sum(test$epic), sum(test$genomics), sum(test$consum))) |>
+    mutate(error_pct = ifelse(actual > 0, 100 * (predicted - actual) / actual, NA_real_))
+}
+
+burn_model <- function(d, fit_start = as_date("2025-12-01"), backtest_months = 3) {
+  today_month <- as_date(d$reference_date)
+  fit_start   <- floor_date(as_date(fit_start), "month")
+  if (is.na(fit_start) || fit_start > today_month)
+    fit_start <- floor_date(today_month %m-% months(6), "month")
+  ser    <- burn_model_series(d, fit_start)
+  epic   <- fit_epic(ser)
+  consum <- fit_consum(ser)
+  genomics_avg <- if (nrow(ser) > 0) mean(ser$genomics) else 0
+
+  # EPIC / Genomics are not FTE-driven: a PSP's forecast gets its historical
+  # share of the stream over the fit window.
+  ist <- d$ist_raw |> filter(!is.na(id), month >= fit_start, month <= today_month)
+  share_of <- function(cat) {
+    x <- ist |> filter(category == cat) |> group_by(id) |>
+      summarise(v = sum(actual_spending, na.rm = TRUE), .groups = "drop") |>
+      mutate(v = pmax(v, 0))
+    if (nrow(x) == 0 || sum(x$v) <= 0) return(setNames(numeric(), character()))
+    setNames(x$v / sum(x$v), x$id)
+  }
+  planned <- if (!is.null(d$investments) && nrow(d$investments) > 0)
+    d$investments |> filter(month > today_month,
+                            str_detect(coalesce(as.character(cat), ""), GENOMICS_INV_PATTERN))
+  else NULL
+  genomics_planned <- !is.null(planned) && nrow(planned) > 0
+
+  list(fit_start = fit_start, series = ser, epic = epic, consum = consum,
+       genomics = list(avg = genomics_avg, planned = genomics_planned,
+                       planned_total = if (genomics_planned) sum(planned$amount) else 0,
+                       planned_n     = if (genomics_planned) nrow(planned) else 0L),
+       epic_share = share_of("EPIC"), genomics_share = share_of("Genomics (FGCZ)"),
+       backtest = burn_backtest(ser, backtest_months),
+       params = list(consum_per_fte = consum$per_fte, consum_base = consum$base,
+                     epic_now = epic$level_now, epic_slope = epic$slope,
+                     epic_growth_months = 6,
+                     genomics_month = if (genomics_planned) 0 else genomics_avg))
+}
+
+# EPIC per future month: current level + growth for `growth_months`, then flat.
+epic_forecast_vec <- function(n_months, epic_now, epic_slope = 0, growth_months = 0) {
+  if (n_months == 0) return(numeric())
+  k <- seq_len(n_months)
+  pmax(epic_now + epic_slope * pmin(k, growth_months), 0)
+}
+
+# Burn-model tab: history, fit and the implied forecast per stream.
+make_burn_model_plots <- function(bm, preview_months = 12) {
+  ser <- bm$series
+  if (nrow(ser) == 0) return(NULL)
+  today_month <- max(ser$month)
+  fut <- tibble(month = today_month %m+% months(seq_len(preview_months)))
+  fmt <- function(x) format(round(x), big.mark = "'")
+  base_theme <- theme_bw(base_size = 11) +
+    theme(plot.title = element_text(face = "bold"), panel.grid.minor = element_blank(),
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1), legend.position = "none")
+  ylab_chf <- scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1))
+
+  # EPIC
+  epic_fit <- tibble(month = ser$month, v = bm$epic$fitted)
+  epic_fut <- fut |> mutate(v = epic_forecast_vec(preview_months, bm$params$epic_now,
+                                                  bm$params$epic_slope, bm$params$epic_growth_months))
+  p_epic <- ggplot() +
+    geom_col(data = ser, aes(month, epic), fill = CATEGORY_COLORS[["EPIC"]], width = 25, alpha = 0.85) +
+    geom_line(data = epic_fit, aes(month, v), colour = "grey20", linewidth = 1) +
+    geom_line(data = epic_fut, aes(month, v), colour = "grey20", linewidth = 1, linetype = "dashed") +
+    geom_vline(xintercept = today_month + 15, colour = "grey60", linetype = "dotted") +
+    scale_x_date(date_breaks = "2 months", date_labels = "%b %y") + ylab_chf +
+    labs(title = paste0("EPIC — now ", fmt(bm$params$epic_now), " CHF/month, trend ",
+                        if (bm$params$epic_slope >= 0) "+" else "", fmt(bm$params$epic_slope),
+                        " CHF/month per month (", bm$epic$method, ")"),
+         subtitle = paste0("Dashed: forecast — growth continues ", bm$params$epic_growth_months,
+                           " months, then flat. Bars: booked (invoices are lumpy)."),
+         x = NULL, y = "CHF / month") + base_theme
+
+  # Genomics
+  p_gen <- ggplot() +
+    geom_col(data = ser, aes(month, genomics), fill = CATEGORY_COLORS[["Genomics (FGCZ)"]], width = 25, alpha = 0.85) +
+    geom_hline(yintercept = bm$genomics$avg, colour = "grey20", linewidth = 1) +
+    scale_x_date(date_breaks = "2 months", date_labels = "%b %y") + ylab_chf +
+    labs(title = paste0("Genomics (FGCZ) — average ", fmt(bm$genomics$avg), " CHF/month",
+                        if (bm$genomics$planned) paste0("; ", bm$genomics$planned_n,
+                          " planned entr", if (bm$genomics$planned_n == 1) "y" else "ies",
+                          " on the Investments tab (", fmt(bm$genomics$planned_total),
+                          " CHF) are used in the forecast instead") else " — used in the forecast (nothing planned)"),
+         x = NULL, y = "CHF / month") + base_theme
+
+  # Consumables + facilities
+  cons_fit <- ser |> mutate(v = bm$consum$base + bm$consum$per_fte * fte)
+  p_c1 <- ggplot() +
+    geom_col(data = ser, aes(month, consum), fill = CATEGORY_COLORS[["Consumables"]], width = 25, alpha = 0.85) +
+    geom_line(data = cons_fit, aes(month, v), colour = "grey20", linewidth = 1) +
+    scale_x_date(date_breaks = "2 months", date_labels = "%b %y") + ylab_chf +
+    labs(title = paste0("Consumables + facilities — ", fmt(bm$consum$per_fte), " CHF per FTE per month",
+                        if (bm$consum$base > 0) paste0(" + base ", fmt(bm$consum$base), " CHF/month") else ""),
+         subtitle = paste0(bm$consum$method,
+                           if (!is.na(bm$consum$r2)) paste0(" — R² ", round(bm$consum$r2, 2)) else "",
+                           ", ", bm$consum$n, " months. Line: fit applied to the plan's FTE."),
+         x = NULL, y = "CHF / month") + base_theme
+  sc <- ser |> filter(fte > 0)
+  p_c2 <- ggplot(sc, aes(fte, consum)) +
+    geom_abline(intercept = bm$consum$base, slope = bm$consum$per_fte, colour = "grey20", linewidth = 1) +
+    geom_point(colour = CATEGORY_COLORS[["Consumables"]], size = 2.5) +
+    ylab_chf +
+    labs(title = "Spend vs FTE (one point per month)", x = "FTE in the salary plan", y = "CHF / month") +
+    base_theme + theme(axis.text.x = element_text(angle = 0))
+
+  gridExtra::grid.arrange(p_epic, p_gen, gridExtra::arrangeGrob(p_c1, p_c2, ncol = 2, widths = c(2, 1)),
+                          ncol = 1, heights = c(1, 0.8, 1.1))
+}
+
+burn_summary_table <- function(bm) {
+  fmt <- function(x) format(round(x), big.mark = "'")
+  rows <- tibble(
+    Stream = c("Consumables + facilities", "", "EPIC", "", "Genomics (FGCZ)"),
+    Parameter = c("CHF per FTE per month (per year)", "Base CHF / month",
+                  "CHF / month now", "Growth CHF / month per month", "CHF / month"),
+    Value = c(paste0(fmt(bm$params$consum_per_fte), " (", fmt(bm$params$consum_per_fte * 12), ")"),
+              fmt(bm$params$consum_base), fmt(bm$params$epic_now), fmt(bm$params$epic_slope),
+              if (bm$genomics$planned) paste0("0 — ", fmt(bm$genomics$planned_total), " CHF planned on Investments")
+              else fmt(bm$genomics$avg)))
+  bt <- bm$backtest
+  if (!is.null(bt)) {
+    rows <- bind_rows(rows, tibble(
+      Stream = paste0("Backtest: ", bt$stream),
+      Parameter = "predicted vs actual, held-out months",
+      Value = paste0(fmt(bt$predicted), " vs ", fmt(bt$actual),
+                     ifelse(is.na(bt$error_pct), "", paste0(" (", ifelse(bt$error_pct >= 0, "+", ""),
+                                                            round(bt$error_pct), "%)")))))
+  }
+  rows
+}
+
+compute_salary_cost <- function(months_vec, d, burn_window_months = 6, psp_id = NULL,
+                                consumables_rate_month = NULL,
+                                consumables_base_month = NULL, burn = NULL) {
   sp <- d$salary_plan
 
   # force all months to Date for reliable matching
@@ -1157,24 +1383,36 @@ compute_salary_cost <- function(months_vec, d, burn_window_months, psp_id = NULL
       filter(month %in% months_vec_d) |>
       group_by(month) |>
       summarise(fte_total = sum(fte, na.rm = TRUE), .groups = "drop")
+    # share of the whole (toggled) team on this PSP — allocates the base cost
+    fte_all_by_month <- sp |> mutate(month = as_date(month)) |>
+      filter(month %in% months_vec_d) |>
+      group_by(month) |>
+      summarise(fte_all = sum(fte, na.rm = TRUE), .groups = "drop")
   } else {
     sal_by_month <- tibble(month = as_date(character()), salary = numeric())
     fte_by_month <- tibble(month = as_date(character()), fte_total = numeric())
+    fte_all_by_month <- tibble(month = as_date(character()), fte_all = numeric())
   }
 
   # Future salary/FTE come from the (possibly person-filtered) plan; the
-  # consumables rate is either the explicit sidebar value or the shared
-  # global calibration (identical to the sidebar suggestion).
-  nonsalary_per_fte_month <- consumables_rate_month %||%
-    consumables_per_fte_month(d, burn_window_months)$per_fte_month
+  # consumables rate and base are either the explicit sidebar values or the
+  # burn-model fit (identical to the sidebar suggestion). An explicit rate
+  # without a base means the plain per-FTE model (base 0).
+  if (is.null(consumables_rate_month)) burn <- burn %||% burn_model(d)
+  nonsalary_per_fte_month <- consumables_rate_month %||% burn$params$consum_per_fte
+  base_month <- consumables_base_month %||%
+    (if (is.null(consumables_rate_month)) burn$params$consum_base else 0)
 
   tibble(month = months_vec_d) |>
     left_join(sal_by_month, by = "month") |>
     left_join(fte_by_month, by = "month") |>
+    left_join(fte_all_by_month, by = "month") |>
     mutate(
       salary    = replace_na(salary, 0),
       fte_total = replace_na(fte_total, 0),
-      cost      = salary + fte_total * nonsalary_per_fte_month
+      fte_all   = replace_na(fte_all, 0),
+      base_share = if (is.null(psp_id)) 1 else ifelse(fte_all > 0, fte_total / fte_all, 0),
+      cost      = salary + fte_total * nonsalary_per_fte_month + base_month * base_share
     ) |>
     pull(cost)
 }
@@ -1193,11 +1431,17 @@ interpolate_balance <- function(df, by = "week") {
 # consumables_rate_month / epic_monthly: explicit sidebar values (0 = toggled
 # off); NULL falls back to the auto-calibrated suggestion, so plot and sidebar
 # can never disagree.
+# consumables_rate_month / consumables_base_month / epic_monthly (+ slope,
+# growth months) / genomics_monthly: explicit sidebar values (0 = toggled
+# off); NULL falls back to the burn-model fit, so plot and sidebar agree.
 make_forecast_plot <- function(d, burn_window_months = 6,
                                 exclude_ids = character(),
                                 inflation_rate = 0,
                                 consumables_rate_month = NULL,
-                                epic_monthly = NULL) {
+                                epic_monthly = NULL,
+                                consumables_base_month = NULL,
+                                epic_slope = NULL, epic_growth_months = NULL,
+                                genomics_monthly = NULL, burn = NULL) {
   konten          <- d$konten
   ist_monthly     <- d$ist_monthly
   planned_income_m<- d$planned_income_m
@@ -1281,13 +1525,21 @@ make_forecast_plot <- function(d, burn_window_months = 6,
   if (start_future > horizon_end) horizon_end <- start_future %m+% months(24)
 
   future_months_vec  <- seq(start_future, horizon_end, by = "1 month")
+  n_f <- length(future_months_vec)
+  if (is.null(consumables_rate_month) || is.null(epic_monthly) || is.null(genomics_monthly))
+    burn <- burn %||% burn_model(d)
   salary_cost        <- compute_salary_cost(future_months_vec, d, burn_window_months, psp_id = NULL,
-                                            consumables_rate_month = consumables_rate_month)
+                                            consumables_rate_month = consumables_rate_month,
+                                            consumables_base_month = consumables_base_month, burn = burn)
   nonsalary_burn     <- if (!is.null(d$salary_plan)) 0 else burn_ref
-  # EPIC only as its own line when the salary-plan model is active; the
-  # burn_ref fallback is a total historical average that already contains it.
-  epic_cost          <- if (is.null(d$salary_plan)) 0
-                        else epic_monthly %||% epic_monthly_avg(d, burn_window_months)
+  # EPIC / Genomics only as their own lines when the salary-plan model is
+  # active; the burn_ref fallback is a total historical average that already
+  # contains them. An explicit EPIC level without a slope is flat.
+  epic_cost <- if (is.null(d$salary_plan)) rep(0, n_f) else
+    epic_forecast_vec(n_f, epic_monthly %||% burn$params$epic_now,
+                      epic_slope %||% (if (is.null(epic_monthly)) burn$params$epic_slope else 0),
+                      epic_growth_months %||% burn$params$epic_growth_months %||% 0)
+  genomics_cost <- if (is.null(d$salary_plan)) 0 else genomics_monthly %||% burn$params$genomics_month
 
   # investments: future one-off costs
   inv <- if (!is.null(d$investments) && nrow(d$investments) > 0)
@@ -1302,7 +1554,7 @@ make_forecast_plot <- function(d, burn_window_months = 6,
            inv_cost       = replace_na(inv_cost, 0),
            months_ahead   = as.numeric(interval(start_future, month) / months(1)),
            infl_mult      = (1 + inflation_rate / 100) ^ (months_ahead / 12),
-           total_spending = (nonsalary_burn + salary_cost + epic_cost) * infl_mult + inv_cost,
+           total_spending = (nonsalary_burn + salary_cost + epic_cost + genomics_cost) * infl_mult + inv_cost,
            balance        = current_surplus + cumsum(total_income - total_spending)) |>
     select(-months_ahead, -infl_mult)
 
@@ -1340,7 +1592,8 @@ make_forecast_plot <- function(d, burn_window_months = 6,
     " | Avg spend (last ", burn_window_months, "m): ",
     format(round(burn_ref), big.mark = "'"), " CHF",
     if (!is.null(d$salary_plan))
-      paste0(" | EPIC: ", format(round(epic_cost), big.mark = "'"), " CHF/m") else "",
+      paste0(" | EPIC: ", format(round(epic_cost[1]), big.mark = "'"), " CHF/m",
+             if (genomics_cost > 0) paste0(" | Genomics: ", format(round(genomics_cost), big.mark = "'"), " CHF/m") else "") else "",
     " | Surplus: ", format(round(current_surplus), big.mark = "'"), " CHF",
     if (!is.na(runout_month))
       paste0(" | Runout: ", format(runout_month, "%Y-%m"),
@@ -1417,7 +1670,10 @@ make_forecast_plot <- function(d, burn_window_months = 6,
 # off); NULL falls back to the auto-calibrated suggestion (EPIC per-PSP here).
 make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_rate = 0,
                                    consumables_rate_month = NULL,
-                                   epic_monthly = NULL) {
+                                   epic_monthly = NULL,
+                                   consumables_base_month = NULL,
+                                   epic_slope = NULL, epic_growth_months = NULL,
+                                   genomics_monthly = NULL, burn = NULL) {
   konten          <- d$konten
   ist_monthly     <- d$ist_monthly
   planned_income_m<- d$planned_income_m
@@ -1505,11 +1761,22 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
   if (start_future > horizon_end) horizon_end <- start_future %m+% months(12)
 
   future_months_vec  <- seq(start_future, horizon_end, by = "1 month")
+  n_f <- length(future_months_vec)
+  if (is.null(consumables_rate_month) || is.null(epic_monthly) || is.null(genomics_monthly))
+    burn <- burn %||% burn_model(d)
   salary_cost        <- compute_salary_cost(future_months_vec, d, burn_window_months, psp_id = psp_id,
-                                            consumables_rate_month = consumables_rate_month)
+                                            consumables_rate_month = consumables_rate_month,
+                                            consumables_base_month = consumables_base_month, burn = burn)
   nonsalary_burn     <- if (!is.null(d$salary_plan)) 0 else burn_ref
-  epic_cost          <- if (is.null(d$salary_plan)) 0
-                        else epic_monthly %||% epic_monthly_avg(d, burn_window_months, psp_id)
+  # EPIC / Genomics: this PSP's historical share of the lab-wide stream
+  # unless the sidebar gives an explicit per-PSP value.
+  psp_share <- function(sh) if (psp_id %in% names(sh)) unname(sh[[psp_id]]) else 0
+  epic_cost <- if (is.null(d$salary_plan)) rep(0, n_f) else
+    epic_forecast_vec(n_f, epic_monthly %||% (burn$params$epic_now * psp_share(burn$epic_share)),
+                      epic_slope %||% (if (is.null(epic_monthly)) burn$params$epic_slope * psp_share(burn$epic_share) else 0),
+                      epic_growth_months %||% burn$params$epic_growth_months %||% 0)
+  genomics_cost <- if (is.null(d$salary_plan)) 0 else
+    genomics_monthly %||% (burn$params$genomics_month * psp_share(burn$genomics_share))
 
   # investments for this PSP
   inv_psp <- if (!is.null(d$investments) && nrow(d$investments) > 0)
@@ -1524,7 +1791,7 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
            inv_cost       = replace_na(inv_cost, 0),
            months_ahead   = as.numeric(interval(start_future, month) / months(1)),
            infl_mult      = (1 + inflation_rate / 100) ^ (months_ahead / 12),
-           total_spending = (nonsalary_burn + salary_cost + epic_cost) * infl_mult + inv_cost,
+           total_spending = (nonsalary_burn + salary_cost + epic_cost + genomics_cost) * infl_mult + inv_cost,
            balance        = current_surplus + cumsum(total_income - total_spending)) |>
     select(-months_ahead, -infl_mult)
 
@@ -1566,7 +1833,8 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
     " | Avg spend (last ", burn_window_months, "m): ",
     format(round(burn_ref), big.mark = "'"), " CHF",
     if (!is.null(d$salary_plan))
-      paste0(" | EPIC: ", format(round(epic_cost), big.mark = "'"), " CHF/m") else "",
+      paste0(" | EPIC: ", format(round(epic_cost[1]), big.mark = "'"), " CHF/m",
+             if (genomics_cost > 0) paste0(" | Genomics: ", format(round(genomics_cost), big.mark = "'"), " CHF/m") else "") else "",
     if (inflation_rate > 0) paste0(" | Inflation: ", inflation_rate, "%/yr") else "",
     " | Surplus: ", format(round(current_surplus), big.mark = "'"), " CHF",
     if (!is.na(runout_month))
@@ -1773,44 +2041,6 @@ make_zp_heatmap <- function(zp_data) {
 # avg_window-month average — computed identically to epic_monthly_avg, so the
 # right end of the line IS the number the forecast sidebar suggests at the
 # same window.
-make_epic_plot <- function(d, avg_window = 12) {
-  df <- d$ist_raw |> filter(category == "EPIC", actual_spending != 0)
-  if (nrow(df) == 0) return(NULL)
-
-  by_psp <- df |>
-    group_by(month, id) |>
-    summarise(value = sum(actual_spending, na.rm = TRUE), .groups = "drop")
-
-  grid <- tibble(month = seq(min(by_psp$month), max(by_psp$month), by = "1 month"))
-  monthly <- grid |>
-    left_join(by_psp |> group_by(month) |>
-                summarise(value = sum(value), .groups = "drop"), by = "month") |>
-    mutate(value = replace_na(value, 0),
-           trail = sapply(seq_along(month), \(i)
-             mean(value[max(1, i - avg_window + 1):i])))
-
-  current_avg <- last(monthly$trail)
-
-  ggplot() +
-    geom_col(data = by_psp, aes(x = month, y = value, fill = id),
-             position = "stack", width = 25, alpha = 0.85) +
-    geom_step(data = monthly, aes(x = month, y = trail),
-              linewidth = 1, color = "grey20") +
-    scale_fill_brewer(palette = "Set2", name = "PSP") +
-    scale_x_date(date_breaks = "3 months", date_labels = "%b %y") +
-    scale_y_continuous(labels = scales::label_number(big.mark = "'", accuracy = 1)) +
-    labs(title    = "EPIC (animal facility) costs",
-         subtitle = paste0("Bars: booked per month (bills usually quarterly). ",
-                           "Line: trailing ", avg_window, "-month average — currently ",
-                           format(round(current_avg), big.mark = "'"), " CHF/month."),
-         x = NULL, y = "CHF / month") +
-    theme_bw(base_size = 12) +
-    theme(plot.title    = element_text(face = "bold"),
-          axis.text.x   = element_text(angle = 90, vjust = 0.5, hjust = 1),
-          panel.grid.minor = element_blank(),
-          legend.position  = "bottom")
-}
-
 # ================================================================
 # Handover export (anonymised summary for grant writing / cloud AI)
 # ================================================================
@@ -1913,8 +2143,7 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
     mutate(`CHF / month` = `CHF in window` / window_months,
            `Share %`     = 100 * `CHF in window` / sum(`CHF in window`)) |>
     arrange(desc(`CHF in window`))
-  rate <- tryCatch(consumables_per_fte_month(d, window_months), error = function(e) NULL)
-  epic <- tryCatch(epic_monthly_avg(d, window_months), error = function(e) NA_real_)
+  bm <- tryCatch(burn_model(d), error = function(e) NULL)
 
   # --- 4. salary: actual (EP) and plan (by role) ----------------------------
   sal_year <- handover_wide_years(
@@ -1994,13 +2223,23 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
     sec(paste0("6. Run rate — last ", window_months, " months (", format(win_start %m+% months(1), "%Y-%m"),
                " to ", format(ref, "%Y-%m"), ")"),
         c(handover_md_table(last_w), "",
-          if (!is.null(rate)) c(
-            paste0("- Average FTE in the salary plan over the window: **", round(rate$past_fte, 2), "**"),
-            paste0("- Non-salary, non-EPIC spend in the window (excl. Equipment, excl. Reserve transfer): **",
-                   handover_fmt(rate$nonsalary_total), "**"),
-            paste0("- Consumables rate: **", handover_fmt(rate$per_fte_month), " CHF per FTE per month** = **",
-                   handover_fmt(rate$per_fte_month * 12), " CHF per FTE per year**")),
-          if (!is.na(epic)) paste0("- EPIC (animal facility) average: **", handover_fmt(epic), " CHF / month**"))),
+          if (!is.null(bm)) c(
+            paste0("Burn model, fitted on the monthly history from ", format(bm$fit_start, "%Y-%m"),
+                   " (", nrow(bm$series), " months):"),
+            paste0("- Consumables + facilities: **", handover_fmt(bm$params$consum_per_fte),
+                   " CHF per FTE per month** = **", handover_fmt(bm$params$consum_per_fte * 12),
+                   " CHF per FTE per year**",
+                   if (bm$params$consum_base > 0) paste0(" plus a base of **", handover_fmt(bm$params$consum_base), " CHF / month**") else "",
+                   " (", bm$consum$method, if (!is.na(bm$consum$r2)) paste0(", R² ", round(bm$consum$r2, 2)) else "", ")"),
+            paste0("- EPIC (animal facility, independent of headcount): **", handover_fmt(bm$params$epic_now),
+                   " CHF / month** now, trend ", if (bm$params$epic_slope >= 0) "+" else "",
+                   handover_fmt(bm$params$epic_slope), " CHF / month per month"),
+            paste0("- Genomics (FGCZ): average **", handover_fmt(bm$genomics$avg), " CHF / month**",
+                   if (bm$genomics$planned) paste0("; ", handover_fmt(bm$genomics$planned_total),
+                                                   " CHF planned explicitly (used instead of the average)") else ""),
+            if (!is.null(bm$backtest)) paste0("- Backtest (last ", 3, " months, predicted vs actual): ",
+                   paste0(bm$backtest$stream, " ", handover_fmt(bm$backtest$predicted), " vs ",
+                          handover_fmt(bm$backtest$actual), collapse = "; "))))),
     sec("7. Actual salary cost by konto and year (booked in SAP)", handover_md_table(sal_year)),
     sec("8. Salary plan by role and year (planned personnel, from Salaryplan.xlsx)",
         c("Persons = distinct people in that role/year; CHF / FTE-month = planned monthly cost of one full-time position.", "",
@@ -2130,17 +2369,27 @@ ui <- page_navbar(
     )
   ),
 
-  nav_panel("🐭 EPIC",
+  nav_panel("📈 Burn model",
     layout_sidebar(
-      sidebar = sidebar(width = 260,
-        sliderInput("epic_avg_window", "Averaging window (months)",
-                    min = 3, max = 24, value = 12, step = 1),
-        helpText("EPIC charges booked in the Einzelposten, stacked by PSP. ",
-                 "Bills usually arrive quarterly; the line smooths them into a ",
-                 "trailing monthly average. Set the forecast's EPIC CHF/month ",
-                 "from the line's current level — or higher if you expect it to grow.")
+      sidebar = sidebar(width = 280,
+        dateInput("burn_fit_start", "Fit history from", value = "2025-12-01",
+                  format = "yyyy-mm-dd", startview = "year"),
+        sliderInput("burn_backtest", "Backtest: hold out the last … months",
+                    min = 2, max = 6, value = 3, step = 1),
+        helpText("Three streams, each with its own driver. ",
+                 strong("Consumables + facilities"), " scale with headcount: spend = base + rate × FTE, ",
+                 "fitted on the monthly history. ",
+                 strong("EPIC"), " is colony background cost, independent of FTE: fitted on the ",
+                 "cumulative series (quarterly bills wash out); the forecast continues the trend for a ",
+                 "number of months you choose, then holds flat. ",
+                 strong("Genomics"), " is planned explicitly on the Investments tab (category ",
+                 "Sequencing/Genomics); the average is only the fallback. ",
+                 "The fitted values pre-fill the Forecast tabs and can be overruled there.")
       ),
-      card(plotOutput("plot_epic", height = "600px"))
+      tagList(
+        card(tableOutput("burn_summary")),
+        card(plotOutput("plot_burn", height = "1100px"))
+      )
     )
   ),
 
@@ -2205,8 +2454,6 @@ ui <- page_navbar(
     layout_sidebar(
       sidebar = sidebar(width = 280,
         uiOutput("ui_psp_select_fc"),
-        sliderInput("burn_window_psp", "Burn rate window (months)",
-                    min = 2, max = 12, value = 6, step = 1),
         sliderInput("inflation_psp", "Inflation on spending (% / year)",
                     min = 0, max = 3, value = 0, step = 0.25),
         uiOutput("ui_cost_controls_psp"),
@@ -2224,11 +2471,9 @@ ui <- page_navbar(
   nav_panel("🔮 Forecast (Total)",
     layout_sidebar(
       sidebar = sidebar(width = 280,
-        sliderInput("burn_window", "Burn rate window (months)",
-                    min = 2, max = 12, value = 6, step = 1),
         sliderInput("inflation", "Inflation on spending (% / year)",
                     min = 0, max = 3, value = 0, step = 0.25),
-        helpText("Salary from Salaryplan.xlsx; consumables scaled by FTE of toggled-on people; EPIC as flat background cost."),
+        helpText("Salary from Salaryplan.xlsx; consumables by FTE of toggled-on people; EPIC and Genomics from the Burn model tab."),
         uiOutput("ui_cost_controls"),
         hr(),
         strong("Personnel — toggle to include/exclude"),
@@ -3136,13 +3381,21 @@ Data up to: ",
     } else print(p)
   })
 
-  output$plot_epic <- renderPlot({
+  # ── Burn model (shared by the tab, the sidebars and both forecasts) ───────
+  burn_fit <- reactive({
     req(rv$data)
-    p <- make_epic_plot(rv$data, avg_window = input$epic_avg_window %||% 12)
-    if (is.null(p)) {
-      plot.new(); text(0.5, 0.5, "No EPIC bookings in the Einzelposten", cex = 1.4, col = "grey50")
-    } else print(p)
+    d <- rv$data
+    d$salary_plan_full <- rv_sal$plan
+    burn_model(d, fit_start = input$burn_fit_start %||% as_date("2025-12-01"),
+               backtest_months = input$burn_backtest %||% 3)
   })
+  output$plot_burn <- renderPlot({
+    bm <- burn_fit()
+    if (is.null(bm) || nrow(bm$series) == 0) {
+      plot.new(); text(0.5, 0.5, "No bookings after the fit start", cex = 1.4, col = "grey50")
+    } else make_burn_model_plots(bm)
+  })
+  output$burn_summary <- renderTable(burn_summary_table(burn_fit()), striped = TRUE, spacing = "xs")
 
   # person list buttons in sidebar
   output$ui_person_list <- renderUI({
@@ -3551,59 +3804,89 @@ Data up to: ",
   # functions — so the sidebar numbers and the forecast math can never diverge.
   # Suggestions recompute (and reset any manual override) when the burn window
   # or the data changes.
-  cost_controls_ui <- function(suffix, burn_window_months, psp_id = NULL) {
-    d <- rv$data
-    d$salary_plan_full <- rv_sal$plan   # calibrate FTE on the full team
-    rate_yr <- round(consumables_per_fte_month(d, burn_window_months)$per_fte_month * 12)
+  # Sidebar boxes are pre-filled from the burn-model fit (per-PSP: the PSP's
+  # historical share of EPIC/Genomics; the base cost is allocated by FTE share
+  # inside compute_salary_cost) and can be overruled; "Reset" re-renders them.
+  rv_costs <- reactiveValues(reset = 0)
+  cost_controls_ui <- function(suffix, psp_id = NULL) {
+    bm <- burn_fit()
+    rv_costs$reset
+    share <- function(sh) if (!is.null(psp_id) && psp_id %in% names(sh)) unname(sh[[psp_id]]) else if (is.null(psp_id)) 1 else 0
+    rate_yr  <- round(bm$params$consum_per_fte * 12)
+    base_m   <- round(bm$params$consum_base)
+    epic_now <- round(bm$params$epic_now * share(bm$epic_share))
+    epic_g   <- round(bm$params$epic_slope * share(bm$epic_share))
+    gen_m    <- round(bm$params$genomics_month * share(bm$genomics_share))
     rate_warn <- if (is.finite(rate_yr) && rate_yr <= 0) div(class = "text-danger small",
-      "⚠ Calibrated rate ≤ 0: credits in the burn window exceed non-salary spending ",
-      "(Storno/Gutschrift). Widen the window or check the data-health notices.")
-    epic_m  <- round(epic_monthly_avg(d, burn_window_months, psp_id))
+      "⚠ Fitted rate ≤ 0: credits exceed non-salary spending in the fit window ",
+      "(Storno/Gutschrift). Move the fit start or check the data-health notices.")
+    note <- function(txt) p(style = "margin:-6px 0 6px;font-size:0.75em;color:#888;", txt)
     div(
       hr(),
-      strong("Consumables"),
-      checkboxInput(paste0("consum_on", suffix), "Include consumables",
+      strong("Consumables + facilities"),
+      checkboxInput(paste0("consum_on", suffix), "Include",
                     value = isolate(input[[paste0("consum_on", suffix)]]) %||% TRUE),
       rate_warn,
-      numericInput(paste0("consum_rate", suffix), "CHF / FTE / year",
-                   value = rate_yr, min = 0, step = 500),
-      p(style="margin:-6px 0 6px;font-size:0.75em;color:#888;",
-        paste0("Suggested ", format(rate_yr, big.mark="'"),
-               " — all grants, last ", burn_window_months,
-               "m, excl. Salary & EPIC. Applied × FTE of people toggled on.")),
-      strong("EPIC (background cost)"),
-      checkboxInput(paste0("epic_on", suffix), "Include EPIC",
+      numericInput(paste0("consum_rate", suffix), "CHF / FTE / year", value = rate_yr, min = 0, step = 500),
+      numericInput(paste0("consum_base", suffix), "Base CHF / month (independent of FTE)", value = base_m, min = 0, step = 100),
+      note(paste0("Fit: ", format(rate_yr, big.mark = "'"), " per FTE/yr",
+                  if (base_m > 0) paste0(" + base ", format(base_m, big.mark = "'"), "/month") else "",
+                  ". Rate × FTE of people toggled on",
+                  if (!is.null(psp_id)) "; base by this PSP's FTE share." else ".")),
+      strong("EPIC (animal facility)"),
+      checkboxInput(paste0("epic_on", suffix), "Include",
                     value = isolate(input[[paste0("epic_on", suffix)]]) %||% TRUE),
-      numericInput(paste0("epic_amt", suffix), "CHF / month",
-                   value = epic_m, min = 0, step = 100),
-      p(style="margin:-6px 0 0;font-size:0.75em;color:#888;",
-        paste0("Suggested ", format(epic_m, big.mark="'"), " — ",
-               if (is.null(psp_id)) "all PSPs" else "this PSP",
-               ", last ", burn_window_months, "m avg. Flat per month, independent of FTE."))
+      numericInput(paste0("epic_amt", suffix), "CHF / month now", value = epic_now, min = 0, step = 100),
+      numericInput(paste0("epic_slope", suffix), "Growth CHF / month per month", value = epic_g, step = 50),
+      numericInput(paste0("epic_growth", suffix), "Growth continues for (months), then flat",
+                   value = bm$params$epic_growth_months, min = 0, max = 60, step = 1),
+      note(paste0("Fit: ", format(epic_now, big.mark = "'"), " now, trend ", if (epic_g >= 0) "+" else "",
+                  format(epic_g, big.mark = "'"), "/month per month",
+                  if (!is.null(psp_id)) paste0(" (", round(100 * share(bm$epic_share)), "% share of the lab's EPIC)") else "",
+                  ". Independent of FTE.")),
+      strong("Genomics (FGCZ)"),
+      checkboxInput(paste0("gen_on", suffix), "Include",
+                    value = isolate(input[[paste0("gen_on", suffix)]]) %||% TRUE),
+      numericInput(paste0("gen_amt", suffix), "CHF / month", value = gen_m, min = 0, step = 100),
+      note(if (bm$genomics$planned)
+             paste0("0 — ", bm$genomics$planned_n, " planned entr", if (bm$genomics$planned_n == 1) "y" else "ies",
+                    " (", format(round(bm$genomics$planned_total), big.mark = "'"),
+                    " CHF) on the Investments tab are used instead of the average.")
+           else paste0("Fit: average ", format(gen_m, big.mark = "'"), "/month",
+                       if (!is.null(psp_id)) paste0(" (", round(100 * share(bm$genomics_share)), "% share)") else "",
+                       ". Plan sequencing explicitly on the Investments tab to replace it.")),
+      actionButton(paste0("reset_costs", suffix), "↺ Reset to fit", class = "btn-sm btn-outline-secondary")
     )
   }
+  observeEvent(input$reset_costs_tot, { rv_costs$reset <- rv_costs$reset + 1 })
+  observeEvent(input$reset_costs_psp, { rv_costs$reset <- rv_costs$reset + 1 })
 
   output$ui_cost_controls <- renderUI({
     req(rv$data)
-    cost_controls_ui("_tot", input$burn_window)
+    cost_controls_ui("_tot")
   })
 
   output$ui_cost_controls_psp <- renderUI({
     req(rv$data, input$psp_id_fc)
-    cost_controls_ui("_psp", input$burn_window_psp, psp_id = input$psp_id_fc)
+    cost_controls_ui("_psp", psp_id = input$psp_id_fc)
   })
 
   # Effective values handed to the plots: 0 when toggled off, box value when
-  # set, NULL (= auto, identical to the suggestion) before the UI first renders.
-  effective_consum_rate_month <- function(suffix) {
-    if (!isTRUE(input[[paste0("consum_on", suffix)]] %||% TRUE)) return(0)
-    v <- suppressWarnings(as.numeric(input[[paste0("consum_rate", suffix)]]))
-    if (length(v) == 0 || is.na(v)) NULL else v / 12
-  }
-  effective_epic_monthly <- function(suffix) {
-    if (!isTRUE(input[[paste0("epic_on", suffix)]] %||% TRUE)) return(0)
-    v <- suppressWarnings(as.numeric(input[[paste0("epic_amt", suffix)]]))
+  # set, NULL (= the fit) before the UI first renders.
+  num_or_null <- function(id) {
+    v <- suppressWarnings(as.numeric(input[[id]]))
     if (length(v) == 0 || is.na(v)) NULL else v
+  }
+  effective_costs <- function(suffix) {
+    on <- function(id) isTRUE(input[[paste0(id, suffix)]] %||% TRUE)
+    list(
+      rate     = if (!on("consum_on")) 0 else { v <- num_or_null(paste0("consum_rate", suffix)); if (is.null(v)) NULL else v / 12 },
+      base     = if (!on("consum_on")) 0 else num_or_null(paste0("consum_base", suffix)),
+      epic     = if (!on("epic_on"))   0 else num_or_null(paste0("epic_amt", suffix)),
+      slope    = if (!on("epic_on"))   0 else num_or_null(paste0("epic_slope", suffix)),
+      growth   = num_or_null(paste0("epic_growth", suffix)),
+      genomics = if (!on("gen_on"))    0 else num_or_null(paste0("gen_amt", suffix))
+    )
   }
 
   # ── Person toggles (checkbox based — reliable re-render) ─────────────────
@@ -3749,10 +4032,12 @@ Data up to: ",
     d_fc$salary_plan      <- sal_plan_psp()
     d_fc$salary_plan_full <- rv_sal$plan   # unfiltered — calibrates past_fte
     d_fc$investments  <- inv_filtered_psp()
-    p <- make_psp_forecast_plot(input$psp_id_fc, d_fc, input$burn_window_psp,
+    ec <- effective_costs("_psp")
+    p <- make_psp_forecast_plot(input$psp_id_fc, d_fc, 6,
                                   inflation_rate = input$inflation_psp,
-                                  consumables_rate_month = effective_consum_rate_month("_psp"),
-                                  epic_monthly = effective_epic_monthly("_psp"))
+                                  consumables_rate_month = ec$rate, consumables_base_month = ec$base,
+                                  epic_monthly = ec$epic, epic_slope = ec$slope, epic_growth_months = ec$growth,
+                                  genomics_monthly = ec$genomics, burn = burn_fit())
     if (is.null(p)) { plot.new(); text(0.5, 0.5, "No data available", cex = 1.5) } else p
   })
 
@@ -3762,10 +4047,12 @@ Data up to: ",
     d_fc$salary_plan      <- sal_plan_tot()
     d_fc$salary_plan_full <- rv_sal$plan   # unfiltered — calibrates past_fte
     d_fc$investments <- inv_filtered_tot()
-    make_forecast_plot(d_fc, burn_window_months = input$burn_window,
+    ec <- effective_costs("_tot")
+    make_forecast_plot(d_fc, burn_window_months = 6,
                        inflation_rate = input$inflation,
-                       consumables_rate_month = effective_consum_rate_month("_tot"),
-                       epic_monthly = effective_epic_monthly("_tot"))
+                       consumables_rate_month = ec$rate, consumables_base_month = ec$base,
+                       epic_monthly = ec$epic, epic_slope = ec$slope, epic_growth_months = ec$growth,
+                       genomics_monthly = ec$genomics, burn = burn_fit())
   })
 }
 

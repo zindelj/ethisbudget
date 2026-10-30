@@ -9,6 +9,8 @@ want  <- c("%||%", "safe_max_date", "canonical_id", "mirror_reserve_transfers",
            "resolve_ep_id_aliases", "INCOME_KURZTEXT_PATTERN",
            "SIGN_INCOME_KURZTEXT_PATTERN", "is_income_row", "storno_is_income",
            "CONSUMABLES_RATE_EXCLUDED_CATEGORIES", "consumables_per_fte_month",
+           "BURN_CONSUM_EXCLUDED", "GENOMICS_INV_PATTERN", "burn_model_series", "fit_epic",
+           "fit_consum", "burn_backtest", "burn_model", "epic_forecast_vec",
            "epic_monthly_avg", "compute_salary_cost",
            "interpolate_balance", "make_forecast_plot", "make_psp_forecast_plot")
 for (e in exprs) {
@@ -247,3 +249,61 @@ d9$ist_raw <- bind_rows(d9$ist_raw,
          actual_spending = 500000, actual_income = 0))
 r9 <- consumables_per_fte_month(d9, 6)
 ok("Equipment excluded from consumables rate", abs(r9$per_fte_month - r$per_fte_month) < 1e-6)
+
+# ---- Burn model -------------------------------------------------------------
+bm <- burn_model(d)
+ok("burn: constant FTE -> ratio method, base 0",
+   bm$consum$base == 0 && abs(bm$consum$per_fte - 2000 / 1.5) < 1e-6)
+ok("burn: no Genomics bookings -> 0/month, not planned",
+   bm$params$genomics_month == 0 && !bm$genomics$planned)
+ok("burn: NULL rate in compute_salary_cost = burn-model fit",
+   all(abs(compute_salary_cost(fut, d, 6) - (12000 + 1.5 * 2000 / 1.5)) < 1e-6))
+
+# regression recovers base + per-FTE when FTE varies
+mb <- seq(as_date("2026-01-01"), as_date("2026-10-01"), by = "1 month")
+fte_b <- c(1, 1, 2, 2, 3, 3, 2, 4, 4, 3)
+db <- d
+db$reference_date <- as_date("2026-10-01")
+db$ist_raw <- tibble(id = "K1", month = mb, category = "Consumables",
+                     actual_spending = 1000 + 800 * fte_b, actual_income = 0)
+db$salary_plan_full <- tibble(name = paste0("P", seq_along(mb)), month = mb, amount = 1, psp = "K1",
+                              role = "PhD Student", fte = fte_b)
+bmb <- burn_model(db)
+ok("burn: regression recovers base 1000 + 800/FTE",
+   abs(bmb$consum$base - 1000) < 1e-6 && abs(bmb$consum$per_fte - 800) < 1e-6)
+ok("burn: base allocated by FTE share per PSP",
+   abs(compute_salary_cost(as_date("2026-11-01"), list(salary_plan = tibble(name = c("A","B"), month = as_date("2026-11-01"),
+       amount = c(10, 20), psp = c("K1","G1"), role = "x", fte = c(1, 3)), reference_date = db$reference_date),
+       psp_id = "G1", consumables_rate_month = 100, consumables_base_month = 400) - (20 + 3 * 100 + 400 * 0.75)) < 1e-6)
+
+# EPIC: linear growth in the monthly rate is recovered from the cumulative fit
+de <- db
+de$ist_raw <- tibble(id = "K1", month = mb, category = "EPIC",
+                     actual_spending = 1000 + 100 * seq_along(mb), actual_income = 0)
+bme <- burn_model(de)
+ok("burn: EPIC slope 100/month recovered", abs(bme$epic$slope - 100) < 1)
+ok("burn: EPIC level now ~2000", abs(bme$epic$level_now - 2000) < 60)
+ok("epic_forecast_vec: growth then flat",
+   identical(epic_forecast_vec(5, 1000, 100, 2), c(1100, 1200, 1200, 1200, 1200)))
+ok("epic_forecast_vec: explicit flat", all(epic_forecast_vec(3, 1500) == 1500))
+
+# Genomics: planned entries on the Investments tab replace the average
+dg <- db
+dg$ist_raw <- tibble(id = "K1", month = mb, category = "Genomics (FGCZ)", actual_spending = 500, actual_income = 0)
+dg$investments <- tibble(month = as_date("2027-01-01"), amount = 40000, desc = "scRNA", psp = "K1", cat = "Sequencing")
+bmg <- burn_model(dg, fit_start = as_date("2026-01-01"))
+ok("burn: genomics average 500 but planned entry wins (0 in forecast)",
+   abs(bmg$genomics$avg - 500) < 1e-6 && bmg$genomics$planned && bmg$params$genomics_month == 0)
+dg$investments <- dg$investments[0, ]
+ok("burn: no planned genomics -> average used", burn_model(dg, fit_start = as_date("2026-01-01"))$params$genomics_month == 500)
+
+# explicit genomics in the total forecast lowers the end balance by n x amount
+p_g0 <- make_forecast_plot(d, 6, inflation_rate = 0, consumables_rate_month = 1200, epic_monthly = 0, genomics_monthly = 0)
+p_g1 <- make_forecast_plot(d, 6, inflation_rate = 0, consumables_rate_month = 1200, epic_monthly = 0, genomics_monthly = 1000)
+n_fut <- 24
+ok("genomics 1000/month over the horizon lowers end balance by n x 1000",
+   abs((num_in(lab_of(p_g0)) - num_in(lab_of(p_g1))) %% 1000) < 1 &&
+   num_in(lab_of(p_g0)) > num_in(lab_of(p_g1)))
+
+# backtest shape
+ok("burn: backtest has one row per stream", is.null(bmb$backtest) || nrow(bmb$backtest) == 3)
