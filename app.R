@@ -485,7 +485,11 @@ load_all_data <- function(ep_path) {
   raw_dir <- dirname(ep_path)
 
   # --- Einzelposten (read first so we can bootstrap other files from it) ---
-  ist_raw <- read_excel(ep_path) |>
+  # readxl guesses "Bezahlt am" as a date column and silently drops the text
+  # cells ('Storno') as NA — force that column to text so reversals are seen.
+  ep_hdr   <- names(read_excel(ep_path, n_max = 0))
+  ep_types <- ifelse(str_detect(tolower(ep_hdr), "^bezahlt"), "text", "guess")
+  ist_raw <- read_excel(ep_path, col_types = ep_types) |>
     clean_names() |>
     rename_with(~ str_replace_all(., "\\.", "_"))
   # SAP renamed "Betrag in BW" -> "Betrag in BukrsWährung" in 2026; map back so the rest of the code is unchanged.
