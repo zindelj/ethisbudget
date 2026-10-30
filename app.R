@@ -282,6 +282,7 @@ CATEGORY_RULES <- tibble::tribble(
   "ILV TPF bud.r.Ko-Ver",    "^Staff Support 1: Export$",  "EPIC",
   "ILV TPF bud.r.Ko-Ver",    "^Staff Support Import$",     "EPIC",
   "ILV TPF bud.r.Ko-Ver",    "^Medikamente HPL$",          "EPIC",
+  "ILV TPF bud.r.Ko-Ver",    "^Cryo Storage",              "EPIC",
   # FGCZ (Functional Genomics Center Zurich): sequencing services + reagents
   "ILV TPF bud.r.Ko-Ver",    "^10X Genomics",              "Genomics (FGCZ)",
   "ILV TPF bud.r.Ko-Ver",    "^Illumina",                  "Genomics (FGCZ)",
