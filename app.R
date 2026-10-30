@@ -455,6 +455,31 @@ mirror_reserve_transfers <- function(ist_raw, konten) {
 }
 
 # ================================================================
+# Storno linter
+# ================================================================
+# A cancelled invoice stays in the export as a normal booking until SAP posts
+# the reversal; its only trace is "Storno" in the "Bezahlt am" column. It is
+# still counted (SAP's Ist counts it too), so make it visible per konto and
+# category instead of letting it inflate a category silently.
+storno_health <- function(ist_raw) {
+  paid_col <- grep("^bezahlt", names(ist_raw), value = TRUE)[1]
+  if (is.na(paid_col)) return(character())
+  st <- ist_raw |>
+    filter(str_detect(tolower(as.character(.data[[paid_col]])), "storno"),
+           !is.na(id))
+  if (nrow(st) == 0) return(character())
+  per <- st |>
+    group_by(id, category) |>
+    summarise(n = n(), chf = sum(betrag_in_bw, na.rm = TRUE), .groups = "drop") |>
+    arrange(desc(abs(chf)))
+  paste0("Einzelposten: ", nrow(st), " booking(s) marked 'Storno' in '", paid_col,
+         "' (", paste0(per$id, " ", per$category, ": ",
+                       format(round(per$chf), big.mark = "'"), " CHF", collapse = "; "),
+         ") — cancelled invoices still count in spending (as in SAP's Ist) until ",
+         "the reversal is posted. Check whether a matching credit exists.")
+}
+
+# ================================================================
 # Load all static data from dirname(ep_path)
 # ================================================================
 load_all_data <- function(ep_path) {
@@ -713,7 +738,7 @@ load_all_data <- function(ep_path) {
   # Collected here and surfaced on the Load Data tab so silent data loss
   # becomes visible instead of quietly skewing forecasts.
   health <- c(ep_health, aliased$notes, zp_health, attr(salary_plan, "health"),
-              mirrored_transfers$notes)
+              mirrored_transfers$notes, storno_health(ist_raw))
 
   zp_unmatched <- setdiff(unique(zahlungsplan$id), konten$id)
   if (length(zp_unmatched) > 0)
