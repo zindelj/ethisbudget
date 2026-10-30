@@ -527,7 +527,7 @@ health_severity <- function(msg) {
         str_detect(m, "^Reserve transfer mirrored") ||
         (str_detect(m, "^VB: own Verantwortungsbereich") ) ||
         (str_detect(m, "'Storno' row") && !str_detect(m, "net -?[1-9]")))   return("info")
-    if (str_detect(m, "IGNORED|DROPPED|failed to read|skipped: |has no Typ|NO expenditure mirrored|match(es)? no konto in Konten|no Kostenstelle booking|different VB values|treated as empty"))
+    if (str_detect(m, "IGNORED|DROPPED|failed to read|skipped: |has no Typ|NO expenditure mirrored|no Kostenstelle booking|different VB values|treated as empty"))
       return("error")
     "warn"
   }, character(1), USE.NAMES = FALSE)
