@@ -26,10 +26,11 @@ library(shinyFiles)
 load_salaryplan <- function(path) {
   sheets <- excel_sheets(path)
 
-  # New format: multiple sheets = one per person (Month | CHF | PSP | Role | FTE)
-  # Each sheet returns list(data=..., notes=...) so parse failures surface in
-  # the data-health report instead of vanishing.
-  if (length(sheets) > 1) {
+  # New format: one sheet per person (Month | CHF | PSP | Role | FTE). Tried
+  # first regardless of sheet count — a plan with a single person has a single
+  # sheet too. Each sheet returns list(data=..., notes=...) so parse failures
+  # surface in the data-health report instead of vanishing.
+  if (length(sheets) >= 1) {
     result <- lapply(sheets, function(nm) {
       tryCatch({
         df        <- read_excel(path, sheet = nm)
@@ -481,6 +482,7 @@ load_all_data <- function(ep_path) {
     "', Buch_Dat='", as.character(ep_bad$buch_dat[1]),
     "', Betrag='", ep_bad$betrag_in_bw[1], "'). These rows are in the export ",
     "but count in NO total or plot.") else character()
+  ist_raw <- ist_raw |> filter(!is.na(month), !is.na(betrag_in_bw), !is.na(id))
 
   ep_ids <- sort(unique(ist_raw$id[!is.na(ist_raw$id)]))
 
@@ -606,8 +608,10 @@ load_all_data <- function(ep_path) {
       next_date      = if_else(is.na(next_date), laufzeit_date, next_date),
       months         = pmax(floor(interval(date, next_date) / months(1)), 1),
       burn_per_month = planned_income / months,
-      burn_month     = map2(date, next_date %m-% months(1),
-                            ~ seq(.x, .y, by = "1 month"))
+      # exactly `months` entries from the tranche date; seq(date, next-1m)
+      # errors when the next boundary is < 1 calendar month away
+      burn_month     = map2(date, months,
+                            ~ .x %m+% months(seq_len(.y) - 1))
     ) |>
     unnest(burn_month) |>
     ungroup() |>
@@ -987,6 +991,7 @@ compute_salary_cost <- function(months_vec, d, burn_window_months, psp_id = NULL
 
 
 interpolate_balance <- function(df, by = "week") {
+  if (nrow(df) < 2) return(df |> select(month, balance))  # approx() needs 2 points
   date_seq <- seq(min(df$month), max(df$month), by = by)
   tibble(month = date_seq) |>
     mutate(balance = approx(df$month, df$balance, xout = month)$y)
@@ -1851,8 +1856,11 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
       "PhD", "Student", "Postdoc", "Other", "Total", "Konto", "Grant"), "[^A-Za-zÀ-ÿ]+"))))
   name_tokens <- unique(unlist(str_split(names_full, "[\\s,._()-]+")))
   name_tokens <- name_tokens[nchar(name_tokens) >= 3 & !tolower(name_tokens) %in% safe_words]
-  forbidden <- unique(c(names_full, name_tokens, key$id,
-                        if (!include_konto_names) key$bezeichnung))
+  # a Bezeichnung that is just app vocabulary ("Forschungsreserve", "Startup")
+  # would otherwise redact category names and legend text
+  bez_forbidden <- if (!include_konto_names) key$bezeichnung else character()
+  bez_forbidden <- bez_forbidden[!tolower(bez_forbidden) %in% safe_words]
+  forbidden <- unique(c(names_full, name_tokens, key$id, bez_forbidden))
   forbidden <- forbidden[!is.na(forbidden) & nchar(forbidden) >= 3]
   for (f in forbidden[order(-nchar(forbidden))]) {
     pat <- regex(paste0("(?<![A-Za-zÀ-ÿ0-9])", stringr::str_escape(f), "(?![A-Za-zÀ-ÿ0-9])"),
@@ -2407,13 +2415,15 @@ server <- function(input, output, session) {
 
     ist_ns <- ist_monthly |> filter(!id %in% exclude_all)
 
+    # Same scope as make_forecast_plot: EP income of ALL accounts (so the
+    # mirrored Reserve transfer nets to zero) + ZP budget of the Kostenstelle
+    # only (Reserve ZP entries would double-count the EP booking).
     past_income_ist <- ist_ns |>
-      filter(!id %in% c(kostenstelle_ids, reserve_ids)) |>
       group_by(month) |>
       summarise(income = sum(actual_income, na.rm = TRUE), .groups = "drop")
 
     kostenstelle_income <- planned_income_m |>
-      filter(id %in% c(kostenstelle_ids, reserve_ids), month <= today_month) |>
+      filter(id %in% kostenstelle_ids, month <= today_month) |>
       group_by(month) |>
       summarise(kost_income = sum(planned_income, na.rm = TRUE), .groups = "drop")
 
@@ -2519,7 +2529,7 @@ Data up to: ",
   })
 
   # ── Reactive salary plan ───────────────────────────────────────────────────
-  rv_sal     <- reactiveValues(plan = NULL)
+  rv_sal     <- reactiveValues(plan = NULL, loaded = NULL)  # loaded = last plan read from disk
   rv_zp      <- reactiveValues(sheets = NULL)  # named list: tab_name -> data.frame
   rv_konten  <- reactiveValues(raw = NULL)
   rv_inv     <- reactiveValues(raw = NULL)
@@ -2739,7 +2749,7 @@ Data up to: ",
       showNotification("❌ Konten.xlsx not found on disk.", type = "error"); return()
     }
     rv_konten$raw <- read_excel(konten_path, col_types = "text") |>
-      mutate(across(everything(), ~ ifelse(
+      mutate(across(-1, ~ ifelse(   # -1: a numeric ID is not an Excel date
         !is.na(suppressWarnings(as.numeric(.x))) & suppressWarnings(as.numeric(.x)) > 10000,
         as.character(as_date(as.numeric(.x), origin = "1899-12-30")), .x
       ))) |>
@@ -2773,11 +2783,21 @@ Data up to: ",
     }))
   })
 
+  # Per-tab / per-person observers are re-created whenever the underlying
+  # list changes; the previous generation must be destroyed first or every
+  # click runs one handler per generation (k saves -> k+1 writes + reloads).
+  dyn_obs <- list(zp_open = list(), zp_save = list(), person = list())
+  destroy_obs <- function(key) {
+    lapply(dyn_obs[[key]], function(o) o$destroy())
+    dyn_obs[[key]] <<- list()
+  }
+
   # open modal when PSP button clicked
   observe({
     sh <- rv_zp$sheets
+    destroy_obs("zp_open")
     if (is.null(sh)) return()
-    lapply(names(sh), function(nm) {
+    dyn_obs$zp_open <<- lapply(names(sh), function(nm) {
       local({
         nm_ <- nm
         btn_id <- paste0("zp_btn_", gsub("[^A-Za-z0-9]", "_", nm_))
@@ -2818,8 +2838,9 @@ Data up to: ",
   # save individual PSP tab back to rv_zp and file
   observe({
     sh <- rv_zp$sheets
+    destroy_obs("zp_save")
     if (is.null(sh)) return()
-    lapply(names(sh), function(nm) {
+    dyn_obs$zp_save <<- lapply(names(sh), function(nm) {
       local({
         nm_    <- nm
         safe   <- gsub("[^A-Za-z0-9]", "_", nm_)
@@ -2906,8 +2927,15 @@ Data up to: ",
     })
   })
 
+  # Take the plan from disk only when the file content actually changed
+  # (new folder, or saved from this app); a reload triggered by saving
+  # Konten/ZP/Investments must not wipe unsaved Salary Plan edits.
   observeEvent(rv$data, {
-    rv_sal$plan    <- rv$data$salary_plan
+    from_disk <- rv$data$salary_plan
+    if (is.null(rv_sal$plan) || !identical(from_disk, rv_sal$loaded)) {
+      rv_sal$plan <- from_disk
+    }
+    rv_sal$loaded <- from_disk
   })
 
 
@@ -2991,9 +3019,10 @@ Data up to: ",
   # Single observer: each button updates selected_person, one observeEvent opens modal
   observe({
     sp <- rv_sal$plan
+    destroy_obs("person")
     if (is.null(sp) || nrow(sp) == 0) return()
     people <- sp |> distinct(name) |> pull(name)
-    lapply(people, function(nm) {
+    dyn_obs$person <<- lapply(people, function(nm) {
       local({
         nm_ <- nm
         btn_id <- paste0("person_btn_", gsub("[^A-Za-z0-9]", "_", nm_))
@@ -3453,26 +3482,20 @@ Data up to: ",
     updateCheckboxGroupInput(session, "included_people_psp", selected = people)
   })
 
-  # filtered salary plan — uses checkbox selection
-  sal_plan_active <- reactive({
-    sp <- rv_sal$plan
+  # filtered salary plan — uses checkbox selection. A checkbox group is NULL
+  # both before its renderUI has produced it and when nothing is ticked; the
+  # *_ready flags (set on the first real value) tell the two apart so that
+  # "everyone unticked" really means no staff.
+  people_ready <- reactiveValues(tot = FALSE, psp = FALSE)
+  observeEvent(input$included_people,     { people_ready$tot <- TRUE })
+  observeEvent(input$included_people_psp, { people_ready$psp <- TRUE })
+  filter_people <- function(sp, inc, ready) {
     if (is.null(sp)) return(NULL)
-    sp
-  })
-  sal_plan_psp <- reactive({
-    sp <- rv_sal$plan
-    if (is.null(sp)) return(NULL)
-    inc <- input$included_people_psp
-    if (is.null(inc)) return(sp)
+    if (is.null(inc)) return(if (ready) sp[0, ] else sp)
     sp |> filter(name %in% inc)
-  })
-  sal_plan_tot <- reactive({
-    sp <- rv_sal$plan
-    if (is.null(sp)) return(NULL)
-    inc <- input$included_people
-    if (is.null(inc)) return(sp)
-    sp |> filter(name %in% inc)
-  })
+  }
+  sal_plan_psp <- reactive(filter_people(rv_sal$plan, input$included_people_psp, people_ready$psp))
+  sal_plan_tot <- reactive(filter_people(rv_sal$plan, input$included_people,     people_ready$tot))
 
   # ── Investment toggles ─────────────────────────────────────────────────────
   make_inv_choices <- function(inv, psp_filter = NULL) {
