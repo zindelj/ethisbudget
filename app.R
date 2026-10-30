@@ -1171,7 +1171,14 @@ epic_monthly_avg <- function(d, burn_window_months, psp_id = NULL) {
 BURN_CONSUM_EXCLUDED <- c("Salary", "EPIC", "Genomics (FGCZ)", "Equipment", "Transfer Forschungsreserve")
 GENOMICS_INV_PATTERN <- "(?i)sequenc|genom|fgcz"
 
-burn_model_series <- function(d, fit_start) {
+# consum_categories: which categories feed the consumables + facilities
+# stream (default: everything not excluded above). Untick e.g. Taconic (a
+# one-off repayment) or Internal charges that are already in the salary plan,
+# and the fitted rate — and with it the forecast — no longer carries them.
+burn_consum_default <- function() setdiff(CATEGORY_ORDER, BURN_CONSUM_EXCLUDED)
+
+burn_model_series <- function(d, fit_start, consum_categories = NULL) {
+  consum_categories <- consum_categories %||% burn_consum_default()
   today_month <- as_date(d$reference_date)
   fit_start   <- as_date(fit_start)
   ist <- d$ist_raw |> filter(!is.na(month), !is.na(id), month >= fit_start, month <= today_month)
@@ -1185,7 +1192,7 @@ burn_model_series <- function(d, fit_start) {
   tibble(month = seq(fit_start, today_month, by = "1 month")) |>
     left_join(by_month(ist |> filter(category == "EPIC"))            |> rename(epic = v),     by = "month") |>
     left_join(by_month(ist |> filter(category == "Genomics (FGCZ)")) |> rename(genomics = v), by = "month") |>
-    left_join(by_month(ist |> filter(!category %in% BURN_CONSUM_EXCLUDED)) |> rename(consum = v), by = "month") |>
+    left_join(by_month(ist |> filter(category %in% consum_categories)) |> rename(consum = v), by = "month") |>
     left_join(fte, by = "month") |>
     mutate(across(c(epic, genomics, consum, fte), ~ replace_na(.x, 0)),
            t = row_number())
@@ -1231,12 +1238,14 @@ burn_backtest <- function(ser, k = 3) {
     mutate(error_pct = ifelse(actual > 0, 100 * (predicted - actual) / actual, NA_real_))
 }
 
-burn_model <- function(d, fit_start = as_date("2025-12-01"), backtest_months = 3) {
+burn_model <- function(d, fit_start = as_date("2025-12-01"), backtest_months = 3,
+                       consum_categories = NULL) {
+  consum_categories <- consum_categories %||% burn_consum_default()
   today_month <- as_date(d$reference_date)
   fit_start   <- floor_date(as_date(fit_start), "month")
   if (is.na(fit_start) || fit_start > today_month)
     fit_start <- floor_date(today_month %m-% months(6), "month")
-  ser    <- burn_model_series(d, fit_start)
+  ser    <- burn_model_series(d, fit_start, consum_categories)
   epic   <- fit_epic(ser)
   consum <- fit_consum(ser)
   genomics_avg <- if (nrow(ser) > 0) mean(ser$genomics) else 0
@@ -1258,6 +1267,8 @@ burn_model <- function(d, fit_start = as_date("2025-12-01"), backtest_months = 3
   genomics_planned <- !is.null(planned) && nrow(planned) > 0
 
   list(fit_start = fit_start, series = ser, epic = epic, consum = consum,
+       consum_categories = consum_categories,
+       consum_excluded   = setdiff(burn_consum_default(), consum_categories),
        genomics = list(avg = genomics_avg, planned = genomics_planned,
                        planned_total = if (genomics_planned) sum(planned$amount) else 0,
                        planned_n     = if (genomics_planned) nrow(planned) else 0L),
@@ -1327,7 +1338,9 @@ make_burn_model_plots <- function(bm, preview_months = 12) {
                         if (bm$consum$base > 0) paste0(" + base ", fmt(bm$consum$base), " CHF/month") else ""),
          subtitle = paste0(bm$consum$method,
                            if (!is.na(bm$consum$r2)) paste0(" — R² ", round(bm$consum$r2, 2)) else "",
-                           ", ", bm$consum$n, " months. Line: fit applied to the plan's FTE."),
+                           ", ", bm$consum$n, " months. Line: fit applied to the plan's FTE.",
+                           if (length(bm$consum_excluded) > 0)
+                             paste0(" Unticked: ", paste(bm$consum_excluded, collapse = ", "), ".") else ""),
          x = NULL, y = "CHF / month") + base_theme
   sc <- ser |> filter(fte > 0)
   p_c2 <- ggplot(sc, aes(fte, consum)) +
@@ -2377,6 +2390,16 @@ ui <- page_navbar(
                   format = "yyyy-mm-dd", startview = "year"),
         sliderInput("burn_backtest", "Backtest: hold out the last … months",
                     min = 2, max = 6, value = 3, step = 1),
+        hr(),
+        strong("Categories in consumables + facilities"),
+        checkboxGroupInput("burn_consum_cats", NULL,
+                           choices = setdiff(CATEGORY_ORDER, BURN_CONSUM_EXCLUDED),
+                           selected = setdiff(CATEGORY_ORDER, BURN_CONSUM_EXCLUDED)),
+        helpText("Untick what will not recur or is planned elsewhere (e.g. a one-off ",
+                 "Taconic repayment, Internal charges that are salaries already in the ",
+                 "salary plan). Salary, EPIC, Genomics, Equipment and the Reserve transfer ",
+                 "are never part of this stream."),
+        hr(),
         helpText("Three streams, each with its own driver. ",
                  strong("Consumables + facilities"), " scale with headcount: spend = base + rate × FTE, ",
                  "fitted on the monthly history. ",
@@ -3388,7 +3411,8 @@ Data up to: ",
     d <- rv$data
     d$salary_plan_full <- rv_sal$plan
     burn_model(d, fit_start = input$burn_fit_start %||% as_date("2025-12-01"),
-               backtest_months = input$burn_backtest %||% 3)
+               backtest_months = input$burn_backtest %||% 3,
+               consum_categories = input$burn_consum_cats)   # NULL = all, before first render
   })
   output$plot_burn <- renderPlot({
     bm <- burn_fit()
