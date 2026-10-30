@@ -3080,7 +3080,7 @@ Data up to: ",
       size  = "xl",
       fluidRow(
         column(8, textInput("modal_name", "Name", value = person_name)),
-        column(4, numericInput("modal_fte", "FTE (for consumables)", value = rv_modal$fte, min = 0.1, max = 1, step = 0.1))
+        column(4, numericInput("modal_fte", "FTE (for consumables; 0 = paid but not in the lab)", value = rv_modal$fte, min = 0, max = 1, step = 0.1))
       ),
       hr(),
       strong("Salary cost incl. overhead (CHF/month)"),

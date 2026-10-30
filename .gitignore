@@ -26,3 +26,6 @@ Thumbs.db
 
 # Claude Code per-machine settings (shared settings.json stays tracked)
 .claude/settings.local.json
+# Handover exports (anonymised, but keep out of history)
+handover_*.md
+handover_*_KEY.txt
