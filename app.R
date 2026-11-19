@@ -2477,6 +2477,39 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
 # UI
 # ================================================================
 # ================================================================
+# Booking export (filtered EP rows → Excel, from the Monitoring tabs)
+# ================================================================
+# The EP rows the app works with (after VB filter, alias remap, Storno and
+# income classification), filtered by konto, category and booking date.
+# Key columns first, then every original EP column. Local download only.
+export_bookings <- function(ist_raw, ids = NULL, categories = NULL, from = NULL, to = NULL) {
+  r <- ist_raw |> filter(!is.na(id))
+  if (length(ids))        r <- r |> filter(id %in% ids)
+  if (length(categories)) r <- r |> filter(category %in% categories)
+  if (!is.null(from) && !is.na(from)) r <- r |> filter(as_date(buch_dat) >= as_date(from))
+  if (!is.null(to)   && !is.na(to))   r <- r |> filter(as_date(buch_dat) <= as_date(to))
+  r |>
+    arrange(buch_dat, id) |>
+    mutate(buch_dat = as_date(buch_dat),
+           side = if_else(coalesce(is_inc, FALSE), "income", "spending")) |>
+    select(buch_dat, konto = id, category, side, kurztext, buchungstext,
+           betrag_in_bw, actual_spending, actual_income,
+           any_of(c("is_storno", "vb")), everything(),
+           -any_of(c("month", "is_inc", "kontierung")))
+}
+
+export_box_ui <- function(scope) {
+  tagList(
+    hr(),
+    strong("Export bookings to Excel"),
+    selectizeInput(paste0("exp_cats_", scope), NULL, choices = CATEGORY_ORDER, multiple = TRUE,
+                   options = list(placeholder = "All categories")),
+    dateRangeInput(paste0("exp_dates_", scope), NULL, format = "yyyy-mm-dd", startview = "year"),
+    downloadButton(paste0("exp_dl_", scope), "⬇ Download .xlsx", class = "btn-sm btn-outline-primary w-100")
+  )
+}
+
+# ================================================================
 # Notes per PSP (notes_<PSP>.txt / notes_ALL.txt in the data folder)
 # ================================================================
 notes_box_ui <- function(scope) {
@@ -2555,6 +2588,7 @@ ui <- page_navbar(
       sidebar = sidebar(
         uiOutput("ui_psp_select"),
         helpText("Actual balance ends at last available data month."),
+        export_box_ui("psp"),
         notes_box_ui("psp")
       ),
       tagList(
@@ -2566,7 +2600,7 @@ ui <- page_navbar(
 
   nav_panel("📊 Monitoring (All PSPs)",
     layout_sidebar(
-      sidebar = sidebar(notes_box_ui("all")),
+      sidebar = sidebar(export_box_ui("all"), notes_box_ui("all")),
       tagList(
         uiOutput("header_monitoring_all"),
         checkboxInput("mon_all_startup", "Include Startup / Voucher accounts (untick to see the grant categories without the Startup equipment)",
@@ -2875,6 +2909,35 @@ server <- function(input, output, session) {
       arrange(id)
     selectInput("psp_id", "Select PSP",
                 choices = setNames(psp_ids$id, psp_ids$label))
+  })
+
+  # ── Booking export (Monitoring sidebars) ─────────────────────────────────
+  exp_ids <- function(scope) if (scope == "all") NULL else input$psp_id
+  for (sc in c("psp", "all")) local({
+    scope <- sc
+    # date range defaults to the selected konto's (or all) booking span
+    observeEvent(list(rv$data, if (scope == "psp") input$psp_id), {
+      req(rv$data)
+      r <- rv$data$ist_raw |> filter(!is.na(buch_dat))
+      if (scope == "psp") { req(input$psp_id); r <- r |> filter(id == input$psp_id) }
+      if (nrow(r) == 0) return()
+      updateDateRangeInput(session, paste0("exp_dates_", scope),
+                           start = min(as_date(r$buch_dat)), end = max(as_date(r$buch_dat)))
+    })
+    output[[paste0("exp_dl_", scope)]] <- downloadHandler(
+      filename = function() {
+        dr <- input[[paste0("exp_dates_", scope)]]
+        paste0("bookings_", if (scope == "all") "ALL" else gsub("[^A-Za-z0-9_-]", "_", input$psp_id %||% ""),
+               "_", format(as_date(dr[1]), "%Y%m%d"), "-", format(as_date(dr[2]), "%Y%m%d"), ".xlsx")
+      },
+      content = function(file) {
+        req(rv$data)
+        dr  <- input[[paste0("exp_dates_", scope)]]
+        out <- export_bookings(rv$data$ist_raw, ids = exp_ids(scope),
+                               categories = input[[paste0("exp_cats_", scope)]],
+                               from = dr[1], to = dr[2])
+        writexl::write_xlsx(list(Bookings = out), file)
+      })
   })
 
   # ── Notes per PSP / All PSPs ─────────────────────────────────────────────

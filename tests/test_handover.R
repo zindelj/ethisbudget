@@ -110,5 +110,19 @@ md3 <- paste(readLines(build_handover(d3, include_konto_names = TRUE, stamp = "t
                        encoding = "UTF-8"), collapse = "\n")
 chk("no initial left before [redacted]", !str_detect(md3, "B\\.\\s*\\[redacted\\]") && str_detect(md3, "Startup \\[redacted\\]"))
 
+# --- booking export (Monitoring sidebar) -------------------------------------
+ex <- export_bookings(d$ist_raw, ids = "1-234567", categories = "Consumables",
+                      from = as_date("2025-03-01"), to = as_date("2025-05-31"))
+chk("export: konto + category + date filter", nrow(ex) == 3 && all(ex$konto == "1-234567") &&
+    all(ex$category == "Consumables") && sum(ex$actual_spending) == 7500)
+chk("export: key columns first, original EP text kept",
+    identical(names(ex)[1:6], c("buch_dat", "konto", "category", "side", "kurztext", "buchungstext")) &&
+    all(ex$buchungstext == "Sigma-Aldrich Bestellung"))
+ex_all <- export_bookings(d$ist_raw)
+chk("export: no filter = every booking, income marked", nrow(ex_all) == nrow(filter(d$ist_raw, !is.na(id))) &&
+    any(ex_all$side == "income"))
+tf <- tempfile(fileext = ".xlsx"); writexl::write_xlsx(list(Bookings = ex), tf)
+chk("export: writes a readable xlsx", nrow(readxl::read_excel(tf)) == 3)
+
 cat(sprintf("\n%d failure(s)\n", fails))
 if (fails > 0) quit(status = 1)
