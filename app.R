@@ -590,7 +590,7 @@ facility_fallback_health <- function(ist_raw) {
   shown <- head(fb, 12)
   paste0("Facility costs: ", sum(fb$n), " booking(s) (", format(round(sum(fb$chf)), big.mark = "'"),
          " CHF) have a Buchungstext not mapped to FACS/EPIC/ScopeM/Genomics: ",
-         paste0("'", shown$bt, "' ", shown$n, "x ", format(round(shown$chf), big.mark = "'"),
+         paste0("'", shown$bt, "' ", shown$n, "x ", format(round(shown$chf), big.mark = "'", trim = TRUE),
                 collapse = "; "),
          if (nrow(fb) > nrow(shown)) paste0("; … ", nrow(fb) - nrow(shown), " more") else "",
          ".")
@@ -611,7 +611,7 @@ other_fallback_health <- function(ist_raw) {
   paste0("Other: ", sum(fb$n), " booking(s) (net ", format(round(sum(fb$chf)), big.mark = "'"),
          " CHF) have a Kurztext not mapped to any category: ",
          paste0("'", shown$kt, "' on ", shown$id, " ", shown$n, "x ",
-                format(round(shown$chf), big.mark = "'"), collapse = "; "),
+                format(round(shown$chf), big.mark = "'", trim = TRUE), collapse = "; "),
          if (nrow(fb) > nrow(shown)) paste0("; … ", nrow(fb) - nrow(shown), " more") else "",
          ".")
 }
