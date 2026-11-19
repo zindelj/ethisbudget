@@ -1275,7 +1275,13 @@ GENOMICS_INV_PATTERN <- "(?i)sequenc|genom|fgcz"
 # stream (default: everything not excluded above). Untick e.g. Taconic (a
 # one-off repayment) or Internal charges that are already in the salary plan,
 # and the fitted rate — and with it the forecast — no longer carries them.
-burn_consum_default <- function() setdiff(CATEGORY_ORDER, BURN_CONSUM_EXCLUDED)
+# Unticked by DEFAULT (can be re-ticked on the Burn model tab): Internal
+# charges are mostly salaries billed internally — those people are already in
+# the salary plan — and Taconic breeding now runs through EPIC (its own stream).
+# Counting either here would double them in the forecast. Decided 2026-11-19.
+BURN_CONSUM_DEFAULT_OFF <- c("Taconic", "Internal charges")
+burn_consum_choices <- function() setdiff(CATEGORY_ORDER, BURN_CONSUM_EXCLUDED)
+burn_consum_default <- function() setdiff(burn_consum_choices(), BURN_CONSUM_DEFAULT_OFF)
 
 burn_model_series <- function(d, fit_start, consum_categories = NULL) {
   consum_categories <- consum_categories %||% burn_consum_default()
@@ -1368,7 +1374,7 @@ burn_model <- function(d, fit_start = as_date("2025-12-01"), backtest_months = 3
 
   list(fit_start = fit_start, series = ser, epic = epic, consum = consum,
        consum_categories = consum_categories,
-       consum_excluded   = setdiff(burn_consum_default(), consum_categories),
+       consum_excluded   = setdiff(burn_consum_choices(), consum_categories),
        genomics = list(avg = genomics_avg, planned = genomics_planned,
                        planned_total = if (genomics_planned) sum(planned$amount) else 0,
                        planned_n     = if (genomics_planned) nrow(planned) else 0L),
@@ -2559,8 +2565,8 @@ ui <- page_navbar(
         hr(),
         strong("Categories in consumables + facilities"),
         checkboxGroupInput("burn_consum_cats", NULL,
-                           choices = setdiff(CATEGORY_ORDER, BURN_CONSUM_EXCLUDED),
-                           selected = setdiff(CATEGORY_ORDER, BURN_CONSUM_EXCLUDED)),
+                           choices = burn_consum_choices(),
+                           selected = burn_consum_default()),
         helpText("Untick what will not recur or is planned elsewhere (e.g. a one-off ",
                  "Taconic repayment, Internal charges that are salaries already in the ",
                  "salary plan). Salary, EPIC, Genomics, Equipment and the Reserve transfer ",

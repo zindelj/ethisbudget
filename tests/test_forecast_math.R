@@ -9,7 +9,7 @@ want  <- c("%||%", "safe_max_date", "canonical_id", "mirror_reserve_transfers",
            "resolve_ep_id_aliases", "INCOME_KURZTEXT_PATTERN",
            "SIGN_INCOME_KURZTEXT_PATTERN", "is_income_row", "storno_is_income",
            "CONSUMABLES_RATE_EXCLUDED_CATEGORIES", "consumables_per_fte_month",
-           "BURN_CONSUM_EXCLUDED", "GENOMICS_INV_PATTERN", "burn_model_series", "fit_epic",
+           "BURN_CONSUM_EXCLUDED", "BURN_CONSUM_DEFAULT_OFF", "burn_consum_choices", "GENOMICS_INV_PATTERN", "burn_model_series", "fit_epic",
            "fit_consum", "burn_backtest", "burn_model", "epic_forecast_vec", "burn_consum_default", "CATEGORY_ORDER",
            "epic_monthly_avg", "compute_salary_cost", "allocation_startup_ids",
            "interpolate_balance", "make_forecast_plot", "make_psp_forecast_plot")
@@ -312,10 +312,13 @@ ok("burn: backtest has one row per stream", is.null(bmb$backtest) || nrow(bmb$ba
 dc <- db
 dc$ist_raw <- bind_rows(dc$ist_raw,
   tibble(id = "K1", month = mb[3], category = "Taconic", actual_spending = 60000, actual_income = 0))
-with_tac    <- burn_model(dc)$consum$per_fte
-without_tac <- burn_model(dc, consum_categories = setdiff(burn_consum_default(), "Taconic"))$consum$per_fte
+with_tac    <- burn_model(dc, consum_categories = c(burn_consum_default(), "Taconic"))$consum$per_fte
+without_tac <- burn_model(dc)$consum$per_fte   # default: Taconic unticked
 ok("burn: Taconic in the stream raises the rate; unticked = original fit",
    with_tac > bmb$consum$per_fte && abs(without_tac - bmb$consum$per_fte) < 1e-6)
+ok("burn: Taconic + Internal charges unticked by default, still tickable",
+   !any(c("Taconic", "Internal charges") %in% burn_consum_default()) &&
+   all(c("Taconic", "Internal charges") %in% burn_consum_choices()))
 ok("burn: default stream never contains the fixed exclusions",
    !any(BURN_CONSUM_EXCLUDED %in% burn_consum_default()))
 
