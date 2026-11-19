@@ -56,8 +56,8 @@ All types count in Forecast (Total), the All-PSPs monitoring and the headers.
 | Tab | What it does |
 |-----|-------------|
 | 📁 Load Data | Pick data folder, see which EP file will load, see load status |
-| 📊 Monitoring (per PSP) | Income, spending and balance per grant; **Bookings in month** card (pick a month, toggle category pills, see the bookings); **Export bookings** (categories + date range → Excel of the EP rows); notes box per PSP (saved as `notes_<PSP>.txt`) |
-| 📊 Monitoring (All PSPs) | Portfolio-level overview; Export bookings across all accounts; notes box (`notes_ALL.txt`) |
+| 📊 Monitoring (per PSP) | Income, spending and balance per grant; **Bookings in month** card (pick a month, toggle category pills, see the bookings); notes box per PSP (saved as `notes_<PSP>.txt`) |
+| 📊 Monitoring (All PSPs) | Portfolio-level overview; Bookings in month card; notes box (`notes_ALL.txt`) |
 | 👥 Salary Plan | Plan personnel costs by person/month/PSP. CHF = what the account is actually charged that month (lump sums stay lump sums); FTE = time physically in the lab (from HR), used only for headcount and the consumables-per-FTE rate — 0 for someone paid but not working in the lab. In a person's card, ⇣ on a month copies its CHF / PSP / Role down to the chosen date (raises, PSP switches); **Check out** moves a leaver to `Leavers.xlsx`. Closing the browser tab with unsaved notes or salary plan edits shows a warning |
 | 💳 Zahlungsplan | Edit expected income tranches, heatmap overview |
 | 💰 Investments | Plan one-off large costs (equipment, sequencing, etc.) |

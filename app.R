@@ -354,6 +354,7 @@ CATEGORY_RULES <- tibble::tribble(
   "Miete mob. Sachanl.",     NA,                           "Consumables",  # rented lab equipment / cylinders
   "Dienstleistungen",        NA,                           "Consumables",
   "Materialkosten",          NA,                           "Consumables",
+  "Kleinspesen <CHF 100",    NA,                           "Consumables",
   "Honorare etc.Gastref",    NA,                           "Travel, Events & Training",
   "Reisekostenrückerst.",    NA,                           "Travel, Events & Training",
   "Fahrzeugaufwand",         NA,                           "Travel, Events & Training",
@@ -2528,39 +2529,6 @@ month_glance_ui <- function(scope) {
 }
 
 # ================================================================
-# Booking export (filtered EP rows → Excel, from the Monitoring tabs)
-# ================================================================
-# The EP rows the app works with (after VB filter, alias remap, Storno and
-# income classification), filtered by konto, category and booking date.
-# Key columns first, then every original EP column. Local download only.
-export_bookings <- function(ist_raw, ids = NULL, categories = NULL, from = NULL, to = NULL) {
-  r <- ist_raw |> filter(!is.na(id))
-  if (length(ids))        r <- r |> filter(id %in% ids)
-  if (length(categories)) r <- r |> filter(category %in% categories)
-  if (!is.null(from) && !is.na(from)) r <- r |> filter(as_date(buch_dat) >= as_date(from))
-  if (!is.null(to)   && !is.na(to))   r <- r |> filter(as_date(buch_dat) <= as_date(to))
-  r |>
-    arrange(buch_dat, id) |>
-    mutate(buch_dat = as_date(buch_dat),
-           side = if_else(coalesce(is_inc, FALSE), "income", "spending")) |>
-    select(buch_dat, konto = id, category, side, kurztext, buchungstext,
-           betrag_in_bw, actual_spending, actual_income,
-           any_of(c("is_storno", "vb")), everything(),
-           -any_of(c("month", "is_inc", "kontierung")))
-}
-
-export_box_ui <- function(scope) {
-  tagList(
-    hr(),
-    strong("Export bookings to Excel"),
-    selectizeInput(paste0("exp_cats_", scope), NULL, choices = CATEGORY_ORDER, multiple = TRUE,
-                   options = list(placeholder = "All categories")),
-    dateRangeInput(paste0("exp_dates_", scope), NULL, format = "yyyy-mm-dd", startview = "year"),
-    downloadButton(paste0("exp_dl_", scope), "⬇ Download .xlsx", class = "btn-sm btn-outline-primary w-100")
-  )
-}
-
-# ================================================================
 # Notes per PSP (notes_<PSP>.txt / notes_ALL.txt in the data folder)
 # ================================================================
 notes_box_ui <- function(scope) {
@@ -2639,7 +2607,6 @@ ui <- page_navbar(
       sidebar = sidebar(
         uiOutput("ui_psp_select"),
         helpText("Actual balance ends at last available data month."),
-        export_box_ui("psp"),
         notes_box_ui("psp")
       ),
       tagList(
@@ -2652,7 +2619,7 @@ ui <- page_navbar(
 
   nav_panel("📊 Monitoring (All PSPs)",
     layout_sidebar(
-      sidebar = sidebar(export_box_ui("all"), notes_box_ui("all")),
+      sidebar = sidebar(notes_box_ui("all")),
       tagList(
         uiOutput("header_monitoring_all"),
         month_glance_ui("all"),
@@ -2974,27 +2941,40 @@ server <- function(input, output, session) {
       if (scope == "psp") { req(input$psp_id); r <- r |> filter(id == input$psp_id) }
       r
     })
+    # A date picker that stops at months: click → year view → pick a month
+    # (bootstrap-datepicker's minViewMode, set via its data attribute).
     output[[paste0("mg_month_ui_", scope)]] <- renderUI({
-      ms <- sort(unique(scope_rows()$month), decreasing = TRUE)
+      ms <- scope_rows()$month
       if (length(ms) == 0) return(helpText("No bookings yet."))
-      selectInput(paste0("mg_month_", scope), "Bookings in month",
-                  choices = setNames(as.character(ms), format(ms, "%b %Y")), selected = as.character(ms[1]))
+      di <- dateInput(paste0("mg_month_", scope), "Bookings in month",
+                      value = max(ms), min = min(ms), max = max(ms),
+                      format = "M yyyy", startview = "year", autoclose = TRUE)
+      htmltools::tagQuery(di)$find("input")$addAttrs(`data-date-min-view-mode` = "months")$allTags()
     })
     month_rows <- reactive({
       m <- input[[paste0("mg_month_", scope)]]; req(m)
-      month_bookings(scope_rows(), as_date(m), ids_now())
+      month_bookings(scope_rows(), floor_date(as_date(m), "month"), ids_now())
     })
+    month_cats <- reactive(unique(month_rows()$Kategorie))
+    observeEvent(input[[paste0("mg_all_", scope)]],
+      updateCheckboxGroupInput(session, paste0("mg_cats_", scope), selected = month_cats()))
+    observeEvent(input[[paste0("mg_none_", scope)]],
+      updateCheckboxGroupInput(session, paste0("mg_cats_", scope), selected = character()))
     output[[paste0("mg_pills_ui_", scope)]] <- renderUI({
       r <- month_rows()
       if (nrow(r) == 0) return(NULL)
       tot  <- r |> group_by(Kategorie) |> summarise(chf = sum(CHF), .groups = "drop") |>
         arrange(match(Kategorie, CATEGORY_ORDER))
       cols <- unname(CATEGORY_COLORS[tot$Kategorie]); cols[is.na(cols)] <- "#888888"
+      tagList(
+      div(style = "margin-bottom:4px;",
+          actionLink(paste0("mg_all_", scope), "select all"), " · ",
+          actionLink(paste0("mg_none_", scope), "unselect all")),
       checkboxGroupInput(paste0("mg_cats_", scope), NULL, inline = TRUE,
         choiceNames = lapply(seq_len(nrow(tot)), function(i)
           tags$span(class = "pill", style = paste0("--c:", cols[i], ";"),
                     paste0(tot$Kategorie[i], " · ", format(round(tot$chf[i]), big.mark = "'", trim = TRUE)))),
-        choiceValues = tot$Kategorie, selected = tot$Kategorie)
+        choiceValues = tot$Kategorie, selected = tot$Kategorie))
     })
     output[[paste0("mg_table_", scope)]] <- renderTable({
       r <- month_rows()
@@ -3008,35 +2988,6 @@ server <- function(input, output, session) {
       tot[[1]] <- "Total"; tot$CHF <- format(round(sum(r$CHF)), big.mark = "'", trim = TRUE)
       bind_rows(out, as_tibble(tot))
     }, striped = TRUE, spacing = "xs", align = "l")
-  })
-
-  # ── Booking export (Monitoring sidebars) ─────────────────────────────────
-  exp_ids <- function(scope) if (scope == "all") NULL else input$psp_id
-  for (sc in c("psp", "all")) local({
-    scope <- sc
-    # date range defaults to the selected konto's (or all) booking span
-    observeEvent(list(rv$data, if (scope == "psp") input$psp_id), {
-      req(rv$data)
-      r <- rv$data$ist_raw |> filter(!is.na(buch_dat))
-      if (scope == "psp") { req(input$psp_id); r <- r |> filter(id == input$psp_id) }
-      if (nrow(r) == 0) return()
-      updateDateRangeInput(session, paste0("exp_dates_", scope),
-                           start = min(as_date(r$buch_dat)), end = max(as_date(r$buch_dat)))
-    })
-    output[[paste0("exp_dl_", scope)]] <- downloadHandler(
-      filename = function() {
-        dr <- input[[paste0("exp_dates_", scope)]]
-        paste0("bookings_", if (scope == "all") "ALL" else gsub("[^A-Za-z0-9_-]", "_", input$psp_id %||% ""),
-               "_", format(as_date(dr[1]), "%Y%m%d"), "-", format(as_date(dr[2]), "%Y%m%d"), ".xlsx")
-      },
-      content = function(file) {
-        req(rv$data)
-        dr  <- input[[paste0("exp_dates_", scope)]]
-        out <- export_bookings(rv$data$ist_raw, ids = exp_ids(scope),
-                               categories = input[[paste0("exp_cats_", scope)]],
-                               from = dr[1], to = dr[2])
-        writexl::write_xlsx(list(Bookings = out), file)
-      })
   })
 
   # ── Notes per PSP / All PSPs ─────────────────────────────────────────────
