@@ -309,6 +309,7 @@ CATEGORY_RULES <- tibble::tribble(
   "ILV TPF bud.r.Ko-Ver",    "^high-end analyzer$",        "FACS",
   "ILV TPF bud.r.Ko-Ver",    "^low-end analyzer$",         "FACS",
   "ILV TPF bud.r.Ko-Ver",    "^Confocal$",                 "ScopeM",
+  "ILV TPF bud.r.Ko-Ver",    "^Wide-field$",               "ScopeM",
   "ILV TPF bud.r.Ko-Ver",    "^Staff$",                    "ScopeM",
   "ILV TPF bud.r.Ko-Ver",    "^Sample Preparation Tool$",  "ScopeM",
   "ILV TPF bud.r.Ko-Ver",    "^TypIIL mouse$",             "EPIC",
@@ -318,7 +319,7 @@ CATEGORY_RULES <- tibble::tribble(
   "ILV TPF bud.r.Ko-Ver",    "^Staff Support 1: Import$",  "EPIC",
   "ILV TPF bud.r.Ko-Ver",    "^Staff Support 1: Export$",  "EPIC",
   "ILV TPF bud.r.Ko-Ver",    "^Staff Support Import$",     "EPIC",
-  "ILV TPF bud.r.Ko-Ver",    "^Medikamente HPL$",          "EPIC",
+  "ILV TPF bud.r.Ko-Ver",    "^Medikamente( HPL)?$",       "EPIC",
   "ILV TPF bud.r.Ko-Ver",    "^Cryo Storage",              "EPIC",
   # FGCZ (Functional Genomics Center Zurich): sequencing services + reagents
   "ILV TPF bud.r.Ko-Ver",    "^10X Genomics",              "Genomics (FGCZ)",
