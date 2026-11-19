@@ -33,6 +33,8 @@ Place an SAP export named **`export_YYYYMMDD_HHMMSS.xlsx`** (e.g. `export_202605
 | File | Purpose |
 |------|---------|
 | `Lohntabelle.xlsx` | Salary rates by role/year — enables PhD/Postdoc auto-fill in Salary Plan |
+| `Leavers.xlsx` | Created by **Check out** in a person's card: their months up to the last paid month (same format as Salaryplan). Still counted as past team for the consumables-per-FTE fit |
+| `notes_<PSP>.txt`, `notes_ALL.txt` | Free-text notes from the notes box on the Monitoring tabs |
 
 ## Konto types (`Typ` column in Konten.xlsx)
 
@@ -54,9 +56,9 @@ All types count in Forecast (Total), the All-PSPs monitoring and the headers.
 | Tab | What it does |
 |-----|-------------|
 | 📁 Load Data | Pick data folder, see which EP file will load, see load status |
-| 📊 Monitoring (per PSP) | Income, spending and balance per grant |
-| 📊 Monitoring (All PSPs) | Portfolio-level overview |
-| 👥 Salary Plan | Plan personnel costs by person/month/PSP. CHF = what the account is actually charged that month (lump sums stay lump sums); FTE = time physically in the lab (from HR), used only for headcount and the consumables-per-FTE rate — 0 for someone paid but not working in the lab |
+| 📊 Monitoring (per PSP) | Income, spending and balance per grant; notes box per PSP (saved as `notes_<PSP>.txt`) |
+| 📊 Monitoring (All PSPs) | Portfolio-level overview; notes box (`notes_ALL.txt`) |
+| 👥 Salary Plan | Plan personnel costs by person/month/PSP. CHF = what the account is actually charged that month (lump sums stay lump sums); FTE = time physically in the lab (from HR), used only for headcount and the consumables-per-FTE rate — 0 for someone paid but not working in the lab. In a person's card, ⇣ on a month copies its CHF / PSP / Role down to the chosen date (raises, PSP switches); **Check out** moves a leaver to `Leavers.xlsx`. Closing the browser tab with unsaved notes or salary plan edits shows a warning |
 | 💳 Zahlungsplan | Edit expected income tranches, heatmap overview |
 | 💰 Investments | Plan one-off large costs (equipment, sequencing, etc.) |
 | 📋 Konten | Edit PSP account details |

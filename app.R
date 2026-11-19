@@ -23,6 +23,23 @@ library(rhandsontable)
 library(shinyFiles)
 
 
+# One sheet per person (Month | CHF | PSP | Role | FTE) — the format
+# load_salaryplan reads. Used for Salaryplan.xlsx and Leavers.xlsx.
+write_salaryplan_xlsx <- function(sp, path) {
+  if (is.null(sp) || nrow(sp) == 0) {
+    sheets <- list(Template = data.frame(Month = character(), CHF = numeric(), PSP = character(),
+                                         Role = character(), FTE = numeric(), stringsAsFactors = FALSE))
+  } else {
+    people <- unique(sp$name)
+    sheets <- lapply(people, function(nm) {
+      sp |> filter(name == nm) |> arrange(month) |>
+        transmute(Month = format(as_date(month), "%Y-%m-%d"), CHF = amount, PSP = psp, Role = role, FTE = fte)
+    })
+    names(sheets) <- people
+  }
+  writexl::write_xlsx(sheets, path)
+}
+
 load_salaryplan <- function(path) {
   sheets <- excel_sheets(path)
 
@@ -132,6 +149,17 @@ load_lohntabelle <- function(path) {
 allocation_startup_ids <- function(konten) {
   kv <- if ("keep_all_vb" %in% names(konten)) coalesce(konten$keep_all_vb, FALSE) else rep(FALSE, nrow(konten))
   konten$id[coalesce(konten$typ == "Startup", FALSE) & !kv]
+}
+
+# Team history = current salary plan + checked-out leavers. Used wherever the
+# PAST team matters (FTE behind the consumables/burn fit, handover), never for
+# future salary cost. A month present in both (re-hired under the same name)
+# keeps the salary-plan row.
+salary_history <- function(plan, leavers) {
+  if (is.null(leavers) || nrow(leavers) == 0) return(plan)
+  if (is.null(plan) || nrow(plan) == 0) return(leavers)
+  lv <- leavers |> anti_join(plan |> select(name, month), by = c("name", "month"))
+  bind_rows(plan, lv)
 }
 
 canonical_id <- function(x) {
@@ -851,6 +879,14 @@ load_all_data <- function(ep_path) {
 
   salary_plan <- tryCatch(load_salaryplan(sal_path), error = function(e) { message("Salaryplan load error: ", e$message); NULL })
 
+  # Leavers.xlsx: people checked out of the salary plan (same sheet format).
+  # Not bootstrapped — it appears on the first check-out. Their past months
+  # still count as team history (FTE behind the consumables fit, handover).
+  leavers_path <- file.path(raw_dir, "Leavers.xlsx")
+  leavers <- if (file.exists(leavers_path))
+    tryCatch(load_salaryplan(leavers_path), error = function(e) {
+      message("Leavers load error: ", e$message); NULL }) else NULL
+
   # raw konten for editing — normalize columns so dates display consistently
   # Columns may be: pure numeric (Excel serial dates), mixed numeric+text (laufzeit_bis has "unendlich"), or text
   konten_raw <- read_excel(file.path(raw_dir, "Konten.xlsx"), col_types = "text") |>
@@ -993,6 +1029,7 @@ load_all_data <- function(ep_path) {
        expected_burn = expected_burn_df, ist_monthly = ist_monthly,
        planned_income_m = planned_income_m, reference_date = reference_date,
        ist_raw = ist_raw, lohntabelle = lohntabelle, salary_plan = salary_plan,
+       leavers = leavers, salary_plan_full = salary_history(salary_plan, leavers),
        investments = investments, raw_dir = raw_dir, health = health)
 }
 
@@ -2369,9 +2406,47 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
 # ================================================================
 # UI
 # ================================================================
+# ================================================================
+# Notes per PSP (notes_<PSP>.txt / notes_ALL.txt in the data folder)
+# ================================================================
+notes_box_ui <- function(scope) {
+  tagList(
+    hr(),
+    textAreaInput(paste0("notes_", scope),
+                  if (scope == "all") "Notes (All PSPs)" else "Notes for this PSP",
+                  rows = 10, resize = "vertical", width = "100%"),
+    fluidRow(
+      column(6, actionButton(paste0("notes_save_", scope), "💾 Save", class = "btn-sm btn-success w-100")),
+      column(6, actionButton(paste0("notes_reload_", scope), "↺ Reload", class = "btn-sm btn-outline-secondary w-100"))
+    ),
+    uiOutput(paste0("notes_status_", scope))
+  )
+}
+notes_path <- function(raw_dir, key)
+  file.path(raw_dir, paste0("notes_", gsub("[^A-Za-z0-9_-]", "_", key), ".txt"))
+read_note <- function(raw_dir, key) {
+  p <- notes_path(raw_dir, key)
+  if (!file.exists(p)) return("")
+  paste(readLines(p, encoding = "UTF-8", warn = FALSE), collapse = "\n")
+}
+write_note <- function(raw_dir, key, txt) {
+  p <- notes_path(raw_dir, key)
+  if (!nzchar(txt) && !file.exists(p)) return(invisible(FALSE))  # nothing to keep
+  con <- file(p, open = "w", encoding = "UTF-8")
+  on.exit(close(con))
+  writeLines(enc2utf8(txt), con)
+  invisible(TRUE)
+}
+
 ui <- page_navbar(
   title = "Lab Budget Monitor",
   theme = bs_theme(bootswatch = "flatly"),
+  # Warn before closing the tab while notes / the salary plan are unsaved.
+  # Browsers only show their own generic "Leave site?" dialog — stay, then save.
+  header = tags$head(tags$script(HTML("
+    Shiny.addCustomMessageHandler('set_unsaved', function(on) {
+      window.onbeforeunload = on ? function(e) { e.preventDefault(); e.returnValue = ''; return ''; } : null;
+    });"))),
 
 
   nav_panel("📁 Load Data",
@@ -2409,7 +2484,8 @@ ui <- page_navbar(
     layout_sidebar(
       sidebar = sidebar(
         uiOutput("ui_psp_select"),
-        helpText("Actual balance ends at last available data month.")
+        helpText("Actual balance ends at last available data month."),
+        notes_box_ui("psp")
       ),
       tagList(
         uiOutput("header_monitoring_psp"),
@@ -2419,11 +2495,14 @@ ui <- page_navbar(
   ),
 
   nav_panel("📊 Monitoring (All PSPs)",
-    tagList(
-      uiOutput("header_monitoring_all"),
-      checkboxInput("mon_all_startup", "Include Startup / Voucher accounts (untick to see the grant categories without the Startup equipment)",
-                    value = TRUE, width = "100%"),
-      card(plotOutput("plot_monitoring_all", height = "1050px"))
+    layout_sidebar(
+      sidebar = sidebar(notes_box_ui("all")),
+      tagList(
+        uiOutput("header_monitoring_all"),
+        checkboxInput("mon_all_startup", "Include Startup / Voucher accounts (untick to see the grant categories without the Startup equipment)",
+                      value = TRUE, width = "100%"),
+        card(plotOutput("plot_monitoring_all", height = "1050px"))
+      )
     )
   ),
 
@@ -2726,6 +2805,67 @@ server <- function(input, output, session) {
       arrange(id)
     selectInput("psp_id", "Select PSP",
                 choices = setNames(psp_ids$id, psp_ids$label))
+  })
+
+  # ── Notes per PSP / All PSPs ─────────────────────────────────────────────
+  # buf = what is in the text box (per key), disk = what the file holds.
+  # Switching PSP keeps unsaved text in buf, so nothing is lost until exit.
+  rv_notes <- reactiveValues(buf = list(), disk = list(), dir = NULL, shown = list())
+  observeEvent(rv$data$raw_dir, {            # new data folder → start fresh
+    if (!identical(rv_notes$dir, rv$data$raw_dir)) {
+      rv_notes$buf <- list(); rv_notes$disk <- list(); rv_notes$shown <- list()
+      rv_notes$dir <- rv$data$raw_dir
+    }
+  })
+  note_key <- function(scope) if (scope == "all") "ALL" else input$psp_id
+  show_note <- function(scope, key, from_disk = FALSE) {
+    req(rv_notes$dir, key)
+    if (from_disk || is.null(rv_notes$disk[[key]])) {
+      rv_notes$disk[[key]] <- read_note(rv_notes$dir, key)
+      rv_notes$buf[[key]]  <- rv_notes$disk[[key]]
+    }
+    rv_notes$shown[[scope]] <- key
+    updateTextAreaInput(session, paste0("notes_", scope), value = rv_notes$buf[[key]])
+  }
+  for (sc in c("psp", "all")) local({
+    scope <- sc
+    trigger <- if (scope == "all") reactive(rv_notes$dir) else reactive(list(rv_notes$dir, input$psp_id))
+    observeEvent(trigger(), {
+      key <- note_key(scope)
+      if (!is.null(rv_notes$dir) && !is.null(key) && nzchar(key)) show_note(scope, key)
+    })
+    observeEvent(input[[paste0("notes_", scope)]], {
+      key <- rv_notes$shown[[scope]]
+      if (!is.null(key)) rv_notes$buf[[key]] <- input[[paste0("notes_", scope)]]
+    }, ignoreInit = TRUE)
+    observeEvent(input[[paste0("notes_save_", scope)]], {
+      key <- rv_notes$shown[[scope]]; req(key, rv_notes$dir)
+      tryCatch({
+        write_note(rv_notes$dir, key, rv_notes$buf[[key]] %||% "")
+        rv_notes$disk[[key]] <- rv_notes$buf[[key]] %||% ""
+        showNotification(paste0("✅ ", basename(notes_path(rv_notes$dir, key)), " saved."),
+                         type = "message", duration = 3)
+      }, error = function(e) showNotification(paste("❌ Note not saved:", e$message), type = "error", duration = 8))
+    })
+    observeEvent(input[[paste0("notes_reload_", scope)]], {
+      key <- rv_notes$shown[[scope]]; req(key)
+      show_note(scope, key, from_disk = TRUE)
+    })
+    output[[paste0("notes_status_", scope)]] <- renderUI({
+      key <- rv_notes$shown[[scope]]
+      if (is.null(key)) return(NULL)
+      dirty <- !identical(rv_notes$buf[[key]] %||% "", rv_notes$disk[[key]] %||% "")
+      tags$small(style = paste0("color:", if (dirty) "#c0392b" else "#888", ";"),
+                 if (dirty) "● unsaved changes" else paste0("saved · ", basename(notes_path(rv_notes$dir, key))))
+    })
+  })
+  notes_dirty <- reactive({
+    keys <- names(rv_notes$buf)
+    any(vapply(keys, function(k) !identical(rv_notes$buf[[k]] %||% "", rv_notes$disk[[k]] %||% ""), logical(1)))
+  })
+  # Arm the browser's leave-page warning while anything is unsaved
+  observe({
+    session$sendCustomMessage("set_unsaved", isTRUE(notes_dirty()) || isTRUE(sal_dirty()))
   })
 
   # ── helper: format CHF numbers ──────────────────────────────────────────
@@ -3035,7 +3175,18 @@ Data up to: ",
   })
 
   # ── Reactive salary plan ───────────────────────────────────────────────────
-  rv_sal     <- reactiveValues(plan = NULL, loaded = NULL)  # loaded = last plan read from disk
+  rv_sal     <- reactiveValues(plan = NULL, loaded = NULL,   # loaded = last plan read from disk
+                               saved = NULL,                  # last plan written/read (dirty check)
+                               leavers = NULL)                # Leavers.xlsx content
+  # Past team = plan + leavers (FTE history for the burn/consumables fit)
+  sal_history <- reactive(salary_history(rv_sal$plan, rv_sal$leavers))
+  # Order/attribute-insensitive fingerprint of a plan, for the unsaved check
+  plan_key <- function(sp) {
+    if (is.null(sp) || nrow(sp) == 0) return("")
+    sp <- sp |> mutate(month = as.character(as_date(month))) |> arrange(name, month)
+    paste(sp$name, sp$month, round(sp$amount, 2), sp$psp, sp$role, sp$fte, collapse = "|")
+  }
+  sal_dirty <- reactive(!identical(plan_key(rv_sal$plan), plan_key(rv_sal$saved)))
   rv_zp      <- reactiveValues(sheets = NULL)  # named list: tab_name -> data.frame
   rv_konten  <- reactiveValues(raw = NULL)
   rv_inv     <- reactiveValues(raw = NULL)
@@ -3439,9 +3590,11 @@ Data up to: ",
   observeEvent(rv$data, {
     from_disk <- rv$data$salary_plan
     if (is.null(rv_sal$plan) || !identical(from_disk, rv_sal$loaded)) {
-      rv_sal$plan <- from_disk
+      rv_sal$plan  <- from_disk
+      rv_sal$saved <- from_disk
     }
-    rv_sal$loaded <- from_disk
+    rv_sal$loaded  <- from_disk
+    rv_sal$leavers <- rv$data$leavers
   })
 
 
@@ -3467,7 +3620,7 @@ Data up to: ",
   burn_fit <- reactive({
     req(rv$data)
     d <- rv$data
-    d$salary_plan_full <- rv_sal$plan
+    d$salary_plan_full <- sal_history()
     burn_model(d, fit_start = input$burn_fit_start %||% as_date("2025-12-01"),
                backtest_months = input$burn_backtest %||% 3,
                consum_categories = input$burn_consum_cats)   # NULL = all, before first render
@@ -3602,11 +3755,20 @@ Data up to: ",
       p(style = "font-size:0.8em;color:#888;margin-bottom:6px;",
         "Each row = one month. Edit amounts, add or remove months freely."),
       uiOutput("modal_fill_controls"),
+      fluidRow(
+        column(4, dateInput("modal_filldown_until", "\u21e3 on a row copies its CHF / PSP / Role down until",
+                            value = if (length(rv_modal$months) > 0) max(as_date(rv_modal$months)) else Sys.Date(),
+                            format = "yyyy-mm", startview = "year")),
+        column(8, p(style = "font-size:0.8em;color:#888;margin-top:28px;",
+          "E.g. a raise or a PSP switch: edit the first changed month, click its \u21e3. ",
+          "Months missing up to that date are created."))
+      ),
       div(style = "max-height:380px;overflow-y:auto;margin-top:8px;border:1px solid #eee;border-radius:4px;padding:4px;",
         uiOutput("modal_month_rows")
       ),
       footer = tagList(
         if (person_name != "") actionButton("modal_delete", "\U0001f5d1 Delete person", class = "btn-danger btn-sm"),
+        if (person_name != "") actionButton("modal_checkout", "\U0001f6aa Check out (left the lab)", class = "btn-outline-secondary btn-sm"),
         modalButton("Cancel"),
         actionButton("modal_save", "Save", class = "btn-primary btn-sm")
       )
@@ -3634,8 +3796,15 @@ Data up to: ",
           column(2, p(style="margin:6px 0;font-size:0.85em;font-weight:600;", format(m, "%b %Y"))),
           column(3, numericInput(paste0("modal_m_",    mkey), NULL, value = amounts[i], min = 0, step = 100)),
           column(3, selectInput( paste0("modal_psp_",  mkey), NULL, choices = psp_choices, selected = psps[i])),
-          column(3, selectInput( paste0("modal_role_", mkey), NULL, choices = sort(unique(c("PhD Student","Postdoc","Other", if(!is.null(rv_sal$plan) && "role" %in% names(rv_sal$plan)) rv_sal$plan$role))), selected = roles[i])),
-          column(1, actionButton(paste0("modal_del_",  mkey), "\u2715", class = "btn-xs btn-outline-danger mt-1"))
+          column(2, selectInput( paste0("modal_role_", mkey), NULL, choices = sort(unique(c("PhD Student","Postdoc","Other", if(!is.null(rv_sal$plan) && "role" %in% names(rv_sal$plan)) rv_sal$plan$role))), selected = roles[i])),
+          column(1, tags$button(type = "button", class = "btn btn-xs btn-outline-primary mt-1",
+                                title = "Copy this month's CHF / PSP / Role down to the 'until' date",
+                                onclick = sprintf("Shiny.setInputValue('modal_filldown', '%s', {priority: 'event'})", mkey),
+                                "\u21e3")),
+          column(1, tags$button(type = "button", class = "btn btn-xs btn-outline-danger mt-1",
+                                title = "Remove this month",
+                                onclick = sprintf("Shiny.setInputValue('modal_delmonth', '%s', {priority: 'event'})", mkey),
+                                "\u2715"))
         )
       )
     }))
@@ -3729,6 +3898,7 @@ Data up to: ",
   # smart add / fill
   observeEvent(input$modal_add_row, {
     req(input$modal_add_yr, input$modal_add_mon, input$modal_add_role)
+    sync_modal_inputs()
     role    <- input$modal_add_role
     lohn    <- rv$data$lohntabelle
     start_m <- as_date(paste0(as.integer(input$modal_add_yr), "-",
@@ -3786,22 +3956,55 @@ Data up to: ",
     rv_modal$roles   <- c(rv_modal$roles[keep],   new_role)
   })
 
-  # delete individual month
-  observe({
+  # Pull the CURRENT cell values (the user may have typed in them) back into
+  # rv_modal. Every action that re-renders the rows must call this first,
+  # otherwise the re-render resets edited cells to their old values.
+  sync_modal_inputs <- function() {
     months <- as_date(rv_modal$months)
-    if (is.null(months) || length(months) == 0) return()
-    lapply(months, function(m) {
-      btn_id <- paste0("modal_del_", format(as_date(m), "%Y_%m"))
-      observeEvent(input[[btn_id]], {
-        idx <- which(as_date(rv_modal$months) == as_date(m))
-        if (length(idx) > 0) {
-          rv_modal$months  <- as_date(rv_modal$months)[-idx]
-          rv_modal$amounts <- rv_modal$amounts[-idx]
-          rv_modal$psps    <- rv_modal$psps[-idx]
-          rv_modal$roles   <- rv_modal$roles[-idx]
-        }
-      }, ignoreInit = TRUE, once = TRUE)
-    })
+    if (length(months) == 0) return(invisible())
+    keys <- format(months, "%Y_%m")
+    rv_modal$amounts <- vapply(seq_along(keys), function(i)
+      as.numeric(input[[paste0("modal_m_", keys[i])]] %||% rv_modal$amounts[i]), numeric(1))
+    rv_modal$psps    <- vapply(seq_along(keys), function(i)
+      as.character(input[[paste0("modal_psp_", keys[i])]] %||% rv_modal$psps[i] %||% ""), character(1))
+    rv_modal$roles   <- vapply(seq_along(keys), function(i)
+      as.character(input[[paste0("modal_role_", keys[i])]] %||% rv_modal$roles[i] %||% "Other"), character(1))
+    invisible()
+  }
+
+  # delete individual month
+  observeEvent(input$modal_delmonth, {
+    sync_modal_inputs()
+    idx <- which(format(as_date(rv_modal$months), "%Y_%m") == input$modal_delmonth)
+    if (length(idx) > 0) {
+      rv_modal$months  <- as_date(rv_modal$months)[-idx]
+      rv_modal$amounts <- rv_modal$amounts[-idx]
+      rv_modal$psps    <- rv_modal$psps[-idx]
+      rv_modal$roles   <- rv_modal$roles[-idx]
+    }
+  })
+
+  # fill down: copy one month's CHF / PSP / Role to every later month up to
+  # the 'until' date, creating missing months (raise, PSP switch, extension)
+  observeEvent(input$modal_filldown, {
+    sync_modal_inputs()
+    months <- as_date(rv_modal$months)
+    src    <- which(format(months, "%Y_%m") == input$modal_filldown)[1]
+    if (is.na(src)) return()
+    until  <- floor_date(as_date(input$modal_filldown_until %||% NA), "month")
+    if (is.na(until) || until <= months[src]) {
+      showNotification("Set the 'until' date after the month you fill from.", type = "warning")
+      return()
+    }
+    targets <- seq(months[src] %m+% months(1), until, by = "1 month")
+    amt <- rv_modal$amounts[src]; psp <- rv_modal$psps[src]; role <- rv_modal$roles[src]
+    keep <- !months %in% targets
+    rv_modal$months  <- as_date(c(months[keep], targets))
+    rv_modal$amounts <- c(rv_modal$amounts[keep], rep(amt,  length(targets)))
+    rv_modal$psps    <- c(rv_modal$psps[keep],    rep(psp,  length(targets)))
+    rv_modal$roles   <- c(rv_modal$roles[keep],   rep(role, length(targets)))
+    showNotification(sprintf("Filled %d month(s) until %s — Save the card, then Save to Salaryplan.xlsx.",
+                             length(targets), format(until, "%b %Y")), type = "message", duration = 4)
   })
 
   # store which person is being edited
@@ -3865,19 +4068,69 @@ Data up to: ",
   # save to xlsx
   observeEvent(input$btn_save_salplan, {
     req(rv_sal$plan)
-    sp <- rv_sal$plan
-    people <- unique(sp$name)
-    sheets <- lapply(people, function(nm) {
-      sp |> filter(name == nm) |> arrange(month) |>
-        transmute(Month = format(as_date(month), "%Y-%m-%d"), CHF = amount, PSP = psp, Role = role, FTE = fte)
-    })
-    names(sheets) <- people
-    sal_path <- file.path(rv$data$raw_dir, "Salaryplan.xlsx")
     tryCatch({
-      writexl::write_xlsx(sheets, sal_path)
+      write_salaryplan_xlsx(rv_sal$plan, file.path(rv$data$raw_dir, "Salaryplan.xlsx"))
+      rv_sal$saved <- rv_sal$plan
       showNotification("✅ Salaryplan.xlsx saved.", type = "message", duration = 3)
     }, error = function(e) {
       showNotification(paste("❌ Save failed:", e$message), type = "error", duration = 6)
+    })
+  })
+
+  # ── Check out a leaver: months up to the last month go to Leavers.xlsx,
+  # later months are dropped, the person leaves Salaryplan.xlsx. Both files
+  # are written at once so a person is never in both or in neither.
+  observeEvent(input$modal_checkout, {
+    req(rv_edit$name)
+    nm   <- rv_edit$name
+    rows <- rv_sal$plan |> filter(name == nm)
+    ref  <- floor_date(as_date(rv$data$reference_date %||% Sys.Date()), "month")
+    past <- as_date(rows$month[as_date(rows$month) <= ref])
+    default_last <- if (length(past) > 0) max(past) else ref
+    rv_checkout$name <- nm
+    removeModal()
+    showModal(modalDialog(
+      title = paste("Check out:", nm),
+      p("Months up to and including the last month are archived to ", code("Leavers.xlsx"),
+        " (they still count as past team for the consumables-per-FTE fit). ",
+        "Later months are dropped. ", nm, " is removed from ", code("Salaryplan.xlsx"), "."),
+      dateInput("checkout_last", "Last paid month", value = default_last,
+                format = "yyyy-mm", startview = "year"),
+      p(style = "font-size:0.85em;color:#888;",
+        "Both files are saved right away — this also saves any other unsaved Salary Plan edits."),
+      footer = tagList(modalButton("Cancel"),
+                       actionButton("checkout_confirm", "Check out", class = "btn-primary btn-sm"))
+    ))
+  })
+  rv_checkout <- reactiveValues(name = NULL)
+
+  observeEvent(input$checkout_confirm, {
+    req(rv_checkout$name, rv$data$raw_dir)
+    nm   <- rv_checkout$name
+    last <- floor_date(as_date(input$checkout_last), "month")
+    req(!is.na(last))
+    plan    <- rv_sal$plan
+    archive <- plan |> filter(name == nm, as_date(month) <= last)
+    lv_path <- file.path(rv$data$raw_dir, "Leavers.xlsx")
+    tryCatch({
+      leavers <- rv_sal$leavers
+      if (!is.null(leavers) && nrow(leavers) > 0)   # re-hired and left again: merge
+        leavers <- leavers |> anti_join(archive |> select(name, month), by = c("name", "month"))
+      leavers <- bind_rows(leavers, archive) |> arrange(name, month)
+      if (nrow(leavers) > 0) write_salaryplan_xlsx(leavers, lv_path)
+      new_plan <- plan |> filter(name != nm)
+      write_salaryplan_xlsx(new_plan, file.path(rv$data$raw_dir, "Salaryplan.xlsx"))
+      rv_sal$leavers <- leavers
+      rv_sal$plan    <- new_plan
+      rv_sal$saved   <- new_plan
+      rv_checkout$name <- NULL
+      reset_modal()
+      removeModal()
+      showNotification(sprintf("✅ %s checked out: %d month(s) archived to Leavers.xlsx.", nm, nrow(archive)),
+                       type = "message", duration = 5)
+    }, error = function(e) {
+      showNotification(paste("❌ Check-out failed (nothing changed in the app):", e$message),
+                       type = "error", duration = 8)
     })
   })
 
@@ -4113,7 +4366,7 @@ Data up to: ",
     req(rv$data, input$psp_id_fc)
     d_fc <- rv$data
     d_fc$salary_plan      <- sal_plan_psp()
-    d_fc$salary_plan_full <- rv_sal$plan   # unfiltered — calibrates past_fte
+    d_fc$salary_plan_full <- sal_history()   # unfiltered + leavers — calibrates past_fte
     d_fc$investments  <- inv_filtered_psp()
     ec <- effective_costs("_psp")
     p <- make_psp_forecast_plot(input$psp_id_fc, d_fc, 6,
@@ -4128,7 +4381,7 @@ Data up to: ",
     req(rv$data)
     d_fc <- rv$data
     d_fc$salary_plan      <- sal_plan_tot()
-    d_fc$salary_plan_full <- rv_sal$plan   # unfiltered — calibrates past_fte
+    d_fc$salary_plan_full <- sal_history()   # unfiltered + leavers — calibrates past_fte
     d_fc$investments <- inv_filtered_tot()
     ec <- effective_costs("_tot")
     make_forecast_plot(d_fc, burn_window_months = 6,

@@ -5,7 +5,8 @@ suppressMessages({
 })
 
 exprs <- parse("app.R")
-want  <- c("%||%", "canonical_id", "extract_zp_id", "parse_any_date", "read_zahlungsplan", "load_salaryplan", "filter_own_vb")
+want  <- c("%||%", "canonical_id", "extract_zp_id", "parse_any_date", "read_zahlungsplan", "load_salaryplan", "filter_own_vb",
+           "write_salaryplan_xlsx", "salary_history", "notes_path", "read_note", "write_note")
 for (e in exprs) {
   if (is.call(e) && as.character(e[[1]]) %in% c("<-", "=")) {
     nm <- gsub("`", "", deparse(e[[2]]))
@@ -64,3 +65,28 @@ ok("other-VB row on shared PSP dropped, Voucher + NA-VB rows kept", nrow(r_vb$is
      !any(r_vb$ist_raw$id == "1-0ETH" & r_vb$ist_raw$vb %in% "124"))
 ok("dropped share reported per konto/VB", any(grepl("1-0ETH VB 124.*20'876", r_vb$notes)))
 ok("no VB column = untouched", nrow(filter_own_vb(ist_vb |> select(-vb), konten_vb)$ist_raw) == 7)
+
+# ---- Leavers: write/read round trip + team history -------------------------
+plan <- tibble(name = c("Ana", "Ana", "Ben"), fte = c(1, 1, 0.5), psp = c("1-000001", "1-000001", "1-000002"),
+               role = c("PhD Student", "PhD Student", "Postdoc"),
+               month = as_date(c("2026-01-01", "2026-02-01", "2026-01-01")), amount = c(5000, 5100, 9000))
+lv_path <- file.path(tmp, "Leavers.xlsx")
+write_salaryplan_xlsx(plan |> filter(name == "Ana"), lv_path)
+lv <- load_salaryplan(lv_path)
+ok("Leavers.xlsx round trip keeps months, CHF, PSP, role, FTE",
+   nrow(lv) == 2 && all(lv$amount == c(5000, 5100)) && all(lv$psp == "1-000001") &&
+   all(lv$role == "PhD Student") && all(lv$fte == 1))
+hist <- salary_history(plan |> filter(name == "Ben"), lv)
+ok("team history = plan + leavers", nrow(hist) == 3 && setequal(hist$name, c("Ana", "Ben")))
+ok("same name+month in plan and leavers counted once",
+   nrow(salary_history(plan, lv)) == 3)
+ok("no leavers = plan unchanged", identical(salary_history(plan, NULL), plan))
+
+# ---- Notes files -----------------------------------------------------------
+nd <- file.path(tmp, "notes_test"); dir.create(nd, showWarnings = FALSE)
+ok("note path sanitises PSP id", basename(notes_path(nd, "1-008665 / x")) == "notes_1-008665___x.txt")
+ok("missing note reads as empty", read_note(nd, "ALL") == "")
+ok("empty note does not create a file", !write_note(nd, "1-000009", "") && !file.exists(notes_path(nd, "1-000009")))
+txt <- "Zürich: Tranche verspätet\nline 2"
+write_note(nd, "1-008665", txt)
+ok("note round trip (multi-line, umlauts)", identical(read_note(nd, "1-008665"), txt))
