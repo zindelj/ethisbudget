@@ -347,7 +347,21 @@ CATEGORY_RULES <- tibble::tribble(
   # (see consumables_per_fte_month).
   "Reserve Jahresabr",       NA,                           "Transfer Forschungsreserve",
 
+  # Mapped 2026-11-19 from the "Other" health notice
+  "Fam.zul. Lohnaufwand",    NA,                           "Salary",
+  "Rückerstattung SUVA",     NA,                           "Salary",   # insurance refund of salary (credit)
+  "Reduktion wg.Taggeld",    NA,                           "Salary",   # salary reduced by daily allowance (credit)
+  "Miete mob. Sachanl.",     NA,                           "Consumables",  # rented lab equipment / cylinders
+  "Dienstleistungen",        NA,                           "Consumables",
+  "Materialkosten",          NA,                           "Consumables",
+  "Honorare etc.Gastref",    NA,                           "Travel, Events & Training",
+  "Reisekostenrückerst.",    NA,                           "Travel, Events & Training",
+  "Fahrzeugaufwand",         NA,                           "Travel, Events & Training",
+  "Mitgliederbeiträge",      NA,                           "IT, Office & Publications",
+  "Übr.Verwaltungsaufw.",    NA,                           "IT, Office & Publications",
+
   # Other
+  "Debitorenverl.effekt",    NA,                           "Other",    # write-off of an unpaid invoice (Erlöse)
   "mehrere",                 NA,                           "Other"
 )
 
@@ -603,6 +617,8 @@ other_fallback_health <- function(ist_raw) {
   fb <- ist_raw |>
     filter(category == "Other", !is.na(id), actual_spending != 0) |>
     mutate(kt = coalesce(str_squish(kurztext), "(empty)")) |>
+    # deliberately mapped to "Other" in CATEGORY_RULES = known, not a notice
+    filter(!kt %in% CATEGORY_RULES$kurztext[CATEGORY_RULES$category == "Other"]) |>
     group_by(kt, id) |>
     summarise(n = n(), chf = sum(actual_spending, na.rm = TRUE), .groups = "drop") |>
     arrange(desc(abs(chf)))

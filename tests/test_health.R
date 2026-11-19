@@ -6,7 +6,7 @@ suppressMessages({
 
 exprs <- parse("app.R")
 want  <- c("%||%", "canonical_id", "extract_zp_id", "parse_any_date", "read_zahlungsplan", "load_salaryplan", "filter_own_vb",
-           "write_salaryplan_xlsx", "salary_history", "other_fallback_health", "notes_path", "read_note", "write_note")
+           "write_salaryplan_xlsx", "salary_history", "other_fallback_health", "CATEGORY_RULES", "notes_path", "read_note", "write_note")
 for (e in exprs) {
   if (is.call(e) && as.character(e[[1]]) %in% c("<-", "=")) {
     nm <- gsub("`", "", deparse(e[[2]]))
@@ -99,3 +99,6 @@ oh <- other_fallback_health(ir)
 ok("Other notice lists Kurztext per konto, biggest first",
    length(oh) == 1 && grepl("^Other: 3 booking", oh) && grepl("'Rückerstattung' on 2-2 1x -15'000; 'Diverses' on 1-1 2x 150", oh))
 ok("no Other rows = no notice", length(other_fallback_health(ir[4, ])) == 0)
+ok("rows deliberately mapped to Other are not reported",
+   length(other_fallback_health(tibble(id = "5-1", category = "Other", kurztext = "Debitorenverl.effekt",
+                                       actual_spending = 604))) == 0)
