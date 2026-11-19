@@ -310,6 +310,7 @@ CATEGORY_RULES <- tibble::tribble(
   "ILV TPF bud.r.Ko-Ver",    "^low-end analyzer$",         "FACS",
   "ILV TPF bud.r.Ko-Ver",    "^Confocal$",                 "ScopeM",
   "ILV TPF bud.r.Ko-Ver",    "^Wide-field$",               "ScopeM",
+  "ILV TPF bud.r.Ko-Ver",    "^Histo$",                    "ScopeM",
   "ILV TPF bud.r.Ko-Ver",    "^Staff$",                    "ScopeM",
   "ILV TPF bud.r.Ko-Ver",    "^Sample Preparation Tool$",  "ScopeM",
   "ILV TPF bud.r.Ko-Ver",    "^TypIIL mouse$",             "EPIC",
