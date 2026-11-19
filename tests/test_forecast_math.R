@@ -11,7 +11,7 @@ want  <- c("%||%", "safe_max_date", "canonical_id", "mirror_reserve_transfers",
            "CONSUMABLES_RATE_EXCLUDED_CATEGORIES", "consumables_per_fte_month",
            "BURN_CONSUM_EXCLUDED", "GENOMICS_INV_PATTERN", "burn_model_series", "fit_epic",
            "fit_consum", "burn_backtest", "burn_model", "epic_forecast_vec", "burn_consum_default", "CATEGORY_ORDER",
-           "epic_monthly_avg", "compute_salary_cost",
+           "epic_monthly_avg", "compute_salary_cost", "allocation_startup_ids",
            "interpolate_balance", "make_forecast_plot", "make_psp_forecast_plot")
 for (e in exprs) {
   if (is.call(e) && as.character(e[[1]]) %in% c("<-", "=")) {
@@ -318,3 +318,11 @@ ok("burn: Taconic in the stream raises the rate; unticked = original fit",
    with_tac > bmb$consum$per_fte && abs(without_tac - bmb$consum$per_fte) < 1e-6)
 ok("burn: default stream never contains the fixed exclusions",
    !any(BURN_CONSUM_EXCLUDED %in% burn_consum_default()))
+
+# Voucher = typ Startup (display/exclusion) but its money arrives as EP income,
+# so it must NOT also count its ZP allocation (balance was 2x the budget)
+kv <- tibble(id = c("S1", "S2", "G1", "K1"), typ = c("Startup", "Startup", "Grant", "Kostenstelle"),
+             keep_all_vb = c(TRUE, FALSE, FALSE, FALSE))
+ok("allocation startups exclude vouchers", identical(allocation_startup_ids(kv), "S2"))
+ok("allocation startups work without keep_all_vb column",
+   identical(allocation_startup_ids(select(kv, -keep_all_vb)), c("S1", "S2")))

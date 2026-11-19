@@ -125,6 +125,15 @@ load_lohntabelle <- function(path) {
 # Helpers (from your scripts, unchanged)
 # ================================================================
 
+# Startup kontos whose money is an ALLOCATION (Zahlungsplan figure, never an
+# EP income row). Vouchers are typ "Startup" for display/exclusion but their
+# money arrives as a real EP transfer, so they get grant income semantics —
+# counting their ZP too would double the income (balance = 2x budget).
+allocation_startup_ids <- function(konten) {
+  kv <- if ("keep_all_vb" %in% names(konten)) coalesce(konten$keep_all_vb, FALSE) else rep(FALSE, nrow(konten))
+  konten$id[coalesce(konten$typ == "Startup", FALSE) & !kv]
+}
+
 canonical_id <- function(x) {
   x <- as.character(x) |> str_trim()
   is_na <- is.na(x)
@@ -527,7 +536,7 @@ health_severity <- function(msg) {
         str_detect(m, "^Reserve transfer mirrored") ||
         (str_detect(m, "^VB: own Verantwortungsbereich") ) ||
         (str_detect(m, "'Storno' row") && !str_detect(m, "net -?[1-9]")))   return("info")
-    if (str_detect(m, "IGNORED|DROPPED|failed to read|skipped: |has no Typ|NO expenditure mirrored|no Kostenstelle booking|different VB values|treated as empty"))
+    if (str_detect(m, "IGNORED|DROPPED|failed to read|skipped: |has no Typ|NO expenditure mirrored|no Kostenstelle booking|different VB values|treated as empty|counted twice"))
       return("error")
     "warn"
   }, character(1), USE.NAMES = FALSE)
@@ -962,6 +971,23 @@ load_all_data <- function(ep_path) {
       "' has no Typ in Konten.xlsx — it is IGNORED everywhere until you set one ",
       "(Grant, Kostenstelle, Startup, Voucher, Reserve or Erlöse)."))
 
+  # Startup kontos count their ZP as the allocation. If the same money ALSO
+  # arrived as EP income rows (a transfer, e.g. a departmental voucher), it
+  # is counted twice — such kontos must be Typ Voucher instead.
+  alloc_ids <- allocation_startup_ids(konten)
+  if (length(alloc_ids) > 0) {
+    zp_sum <- planned_income_m |> filter(id %in% alloc_ids, month <= reference_date) |>
+      group_by(id) |> summarise(zp = sum(planned_income, na.rm = TRUE), .groups = "drop")
+    ep_sum <- ist_monthly |> filter(id %in% alloc_ids) |>
+      group_by(id) |> summarise(ep = sum(actual_income, na.rm = TRUE), .groups = "drop")
+    dbl <- inner_join(zp_sum, ep_sum, by = "id") |> filter(zp > 0, ep >= 0.5 * zp)
+    if (nrow(dbl) > 0)
+      health <- c(health, paste0("Konto '", dbl$id, "' is Typ Startup, but besides its ",
+        "Zahlungsplan allocation (", format(round(dbl$zp), big.mark = "'"), " CHF) it also has ",
+        format(round(dbl$ep), big.mark = "'"), " CHF of booked income in the Einzelposten — ",
+        "the money is counted twice. If it was transferred in (e.g. a voucher), set Typ = Voucher."))
+  }
+
   list(konten = konten, konten_raw = konten_raw,
        zahlungsplan = zahlungsplan_combined,
        expected_burn = expected_burn_df, ist_monthly = ist_monthly,
@@ -986,7 +1012,7 @@ make_psp_plot <- function(psp_id, d) {
   if (!psp_id %in% unique(ist_monthly$id))    return(NULL)
   if (!psp_id %in% unique(planned_income_m$id)) return(NULL)
 
-  planned_funded <- psp_id %in% c(kostenstelle_ids, startup_ids)
+  planned_funded <- psp_id %in% c(kostenstelle_ids, allocation_startup_ids(konten))
   balance_label  <- if (planned_funded) "Balance (planned-funded)" else "Actual balance"
 
   ts <- planned_income_m |>
@@ -1009,7 +1035,7 @@ make_psp_plot <- function(psp_id, d) {
                                        ave(actual_spending, year, FUN = cumsum),
         # Startup (ETH-allocated money, never an EP income row): the ZP
         # figure on its date plus any EP income (reimbursements), as for K.
-        psp_id %in% startup_ids      ~ cumsum(planned_income + actual_income - actual_spending),
+        psp_id %in% allocation_startup_ids(konten)      ~ cumsum(planned_income + actual_income - actual_spending),
         TRUE                         ~ cumsum(actual_income  - actual_spending)
       ),
       # Fix: actual balance line ends at last IST month
@@ -1501,7 +1527,7 @@ make_forecast_plot <- function(d, burn_window_months = 6,
     summarise(income_ist = sum(actual_income, na.rm = TRUE), .groups = "drop")
 
   kostenstelle_income <- planned_income_m |>
-    filter(id %in% c(kostenstelle_ids, startup_ids), !id %in% exclude_all) |>
+    filter(id %in% c(kostenstelle_ids, allocation_startup_ids(konten)), !id %in% exclude_all) |>
     group_by(month) |>
     summarise(kostenstelle_income = sum(planned_income, na.rm = TRUE), .groups = "drop")
 
@@ -1720,7 +1746,7 @@ make_psp_forecast_plot <- function(psp_id, d, burn_window_months = 6, inflation_
 
   # Reserve is NOT planned-funded: its income arrives as actual EP bookings
   # (year-end transfer, see mirror_reserve_transfers), not via Zahlungsplan.
-  planned_funded <- psp_id %in% c(kostenstelle_ids, startup_ids)
+  planned_funded <- psp_id %in% c(kostenstelle_ids, allocation_startup_ids(konten))
 
   # Past
   ist_psp <- ist_monthly |> filter(id == psp_id)
@@ -2762,7 +2788,7 @@ server <- function(input, output, session) {
       income_so_far <- d$planned_income_m |>
         filter(id == psp_id, year(month) == cur_year) |>
         summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
-    } else if (psp_id %in% startup_ids) {
+    } else if (psp_id %in% allocation_startup_ids(konten)) {
       # ZP allocation + EP income rows (reimbursements), as in the plots
       income_so_far <- (d$planned_income_m |>
         filter(id == psp_id, month <= today_month) |>
@@ -2841,7 +2867,7 @@ server <- function(input, output, session) {
       filter(id %in% kostenstelle_ids, year(month) == cur_year) |>
       summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
     income_startup <- d$planned_income_m |>
-      filter(id %in% startup_ids, month <= today_month) |>
+      filter(id %in% allocation_startup_ids(konten), month <= today_month) |>
       summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
     income_actual <- d$ist_monthly |>
       filter(!id %in% c(kostenstelle_ids, exclude_all), month <= today_month) |>
@@ -2903,7 +2929,7 @@ server <- function(input, output, session) {
       summarise(income = sum(actual_income, na.rm = TRUE), .groups = "drop")
 
     kostenstelle_income <- planned_income_m |>
-      filter(id %in% c(kostenstelle_ids, startup_ids), month <= today_month) |>
+      filter(id %in% c(kostenstelle_ids, allocation_startup_ids(konten)), month <= today_month) |>
       group_by(month) |>
       summarise(kost_income = sum(planned_income, na.rm = TRUE), .groups = "drop")
 
