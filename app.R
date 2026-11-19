@@ -2407,68 +2407,6 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
 # UI
 # ================================================================
 # ================================================================
-# Rebooking helper: Kostenstelle costs that could move to expiring grants
-# ================================================================
-# Unspent Kostenstelle money is swept into the Forschungsreserve at year end
-# (the most flexible money), while grant money that is not spent by the
-# Laufzeit is lost. So costs sitting on the Kostenstelle that a grant could
-# legitimately carry are worth re-booking to the grant that expires first.
-# Re-booking only works inside the open fiscal year → current-year rows only.
-REBOOK_DEFAULT_CATEGORIES <- c("EPIC", "Genomics (FGCZ)", "Animal purchase")
-
-rebooking_candidates <- function(d, categories = REBOOK_DEFAULT_CATEGORIES,
-                                 year_sel = year(d$reference_date)) {
-  k_ids <- d$konten$id[coalesce(d$konten$typ == "Kostenstelle", FALSE)]
-  r <- d$ist_raw |>
-    filter(id %in% k_ids, category %in% categories, year(month) == year_sel,
-           actual_spending != 0)
-  if (nrow(r) == 0) return(NULL)
-  beleg_col <- grep("^beleg", names(r), value = TRUE)[1]
-  r |>
-    transmute(Datum        = format(as_date(buch_dat), "%Y-%m-%d"),
-              Konto        = id,
-              Kategorie    = category,
-              Beleg        = if (!is.na(beleg_col)) as.character(.data[[beleg_col]]) else NA_character_,
-              Kurztext     = kurztext,
-              Buchungstext = buchungstext,
-              CHF          = actual_spending) |>
-    select(where(~ !all(is.na(.x)))) |>
-    arrange(Kategorie, Datum)
-}
-
-# Room on each running grant until its Laufzeit, BEFORE re-booking:
-# balance today + tranches still due − planned salary − non-salary costs at
-# the last-12-months pace. Positive = money that would be left (lost) at the
-# end → room to take Kostenstelle costs.
-grant_rebook_room <- function(d, salary_plan = d$salary_plan) {
-  ref <- as_date(d$reference_date)
-  gr <- d$konten |>
-    filter(!coalesce(typ, "") %in% c("Kostenstelle", "Startup", "Reserve", "Erlöse"),
-           !is.na(laufzeit_date), laufzeit_date > ref)
-  if (nrow(gr) == 0) return(NULL)
-  sp <- salary_plan %||% tibble(psp = character(), month = as_date(character()), amount = numeric())
-  pace_from <- ref %m-% months(12)
-  purrr::map_dfr(seq_len(nrow(gr)), function(i) {
-    g   <- gr$id[i]; end <- gr$laufzeit_date[i]
-    ist <- d$ist_monthly |> filter(id == g)
-    bal <- sum(ist$actual_income, na.rm = TRUE) - sum(ist$actual_spending, na.rm = TRUE)
-    zp  <- d$planned_income_m |> filter(id == g, month > ref, month <= end) |>
-      summarise(v = sum(planned_income, na.rm = TRUE)) |> pull(v)
-    sal <- sp |> filter(psp == g, as_date(month) > ref, as_date(month) <= end) |>
-      summarise(v = sum(amount, na.rm = TRUE)) |> pull(v)
-    n_left <- max(0, interval(ref, floor_date(end, "month")) %/% months(1))
-    nonsal <- d$ist_raw |> filter(id == g, month > pace_from, month <= ref, category != "Salary") |>
-      summarise(v = sum(actual_spending, na.rm = TRUE)) |> pull(v)
-    other  <- nonsal / 12 * n_left
-    tibble(Konto = g, Bezeichnung = gr$bezeichnung[i],
-           `Laufzeit bis` = format(end, "%Y-%m-%d"), `Months left` = n_left,
-           `Balance today` = bal, `Tranches still due` = zp,
-           `Planned salary to end` = sal, `Other costs to end (12-mo pace)` = other,
-           `Room at end` = bal + zp - sal - other)
-  }) |> arrange(`Laufzeit bis`)
-}
-
-# ================================================================
 # Notes per PSP (notes_<PSP>.txt / notes_ALL.txt in the data folder)
 # ================================================================
 notes_box_ui <- function(scope) {
@@ -2564,31 +2502,6 @@ ui <- page_navbar(
         checkboxInput("mon_all_startup", "Include Startup / Voucher accounts (untick to see the grant categories without the Startup equipment)",
                       value = TRUE, width = "100%"),
         card(plotOutput("plot_monitoring_all", height = "1050px"))
-      )
-    )
-  ),
-
-  nav_panel("🔁 Rebooking",
-    layout_sidebar(
-      sidebar = sidebar(width = 280,
-        checkboxGroupInput("rebook_cats", "Kostenstelle cost categories",
-                           choices = CATEGORY_ORDER, selected = REBOOK_DEFAULT_CATEGORIES),
-        uiOutput("ui_rebook_year"),
-        helpText("Unspent Kostenstelle money becomes Forschungsreserve at year end (flexible); ",
-                 "unspent grant money is lost at the Laufzeit. Costs a grant may legitimately ",
-                 "carry are worth moving from the Kostenstelle to the grant that ends first ",
-                 "and still has room. Only the open fiscal year can be re-booked — check ",
-                 "each grant's eligibility rules (SNSF: project-related costs only).")
-      ),
-      tagList(
-        card(card_header("Grants by end date — room for re-booked costs"),
-             helpText("Room at end = balance today + tranches still due − planned salary to the Laufzeit − ",
-                      "non-salary costs at the last-12-months pace. Positive = money that would be left over ",
-                      "(and lost) → room to take Kostenstelle costs. Rough: uses the saved salary plan."),
-             tableOutput("rebook_room")),
-        card(card_header(textOutput("rebook_rows_title", inline = TRUE)),
-             tableOutput("rebook_summary"),
-             tableOutput("rebook_rows"))
       )
     )
   ),
@@ -2954,40 +2867,6 @@ server <- function(input, output, session) {
   observe({
     session$sendCustomMessage("set_unsaved", isTRUE(notes_dirty()) || isTRUE(sal_dirty()))
   })
-
-  # ── Rebooking helper ─────────────────────────────────────────────────────
-  output$ui_rebook_year <- renderUI({
-    req(rv$data)
-    y <- year(rv$data$reference_date)
-    selectInput("rebook_year", "Fiscal year", choices = c(y, y - 1), selected = y)
-  })
-  rebook_rows <- reactive({
-    req(rv$data)
-    rebooking_candidates(rv$data, input$rebook_cats %||% REBOOK_DEFAULT_CATEGORIES,
-                         as.integer(input$rebook_year %||% year(rv$data$reference_date)))
-  })
-  fmt_tbl <- function(df) df |> mutate(across(where(is.numeric), ~ format(round(.x), big.mark = "'", scientific = FALSE)))
-  output$rebook_room <- renderTable({
-    req(rv$data)
-    r <- grant_rebook_room(rv$data, rv_sal$plan)
-    if (is.null(r)) return(NULL)
-    r |> mutate(`Months left` = as.integer(`Months left`)) |> fmt_tbl()
-  }, striped = TRUE, spacing = "xs", align = "l")
-  output$rebook_rows_title <- renderText({
-    r <- rebook_rows()
-    y <- input$rebook_year %||% ""
-    if (is.null(r)) paste0("Kostenstelle bookings ", y, ": none in the selected categories")
-    else paste0("Kostenstelle bookings ", y, " — ", nrow(r), " row(s), ",
-                format(round(sum(r$CHF)), big.mark = "'"), " CHF")
-  })
-  output$rebook_summary <- renderTable({
-    r <- rebook_rows(); if (is.null(r)) return(NULL)
-    r |> group_by(Kategorie) |> summarise(Rows = n(), CHF = sum(CHF), .groups = "drop") |> fmt_tbl()
-  }, striped = TRUE, spacing = "xs")
-  output$rebook_rows <- renderTable({
-    r <- rebook_rows(); if (is.null(r)) return(NULL)
-    fmt_tbl(r)
-  }, striped = TRUE, spacing = "xs")
 
   # ── helper: format CHF numbers ──────────────────────────────────────────
   fmt_chf <- function(x) format(round(x), big.mark = "'", scientific = FALSE)

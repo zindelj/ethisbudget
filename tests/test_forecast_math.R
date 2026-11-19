@@ -11,7 +11,7 @@ want  <- c("%||%", "safe_max_date", "canonical_id", "mirror_reserve_transfers",
            "CONSUMABLES_RATE_EXCLUDED_CATEGORIES", "consumables_per_fte_month",
            "BURN_CONSUM_EXCLUDED", "GENOMICS_INV_PATTERN", "burn_model_series", "fit_epic",
            "fit_consum", "burn_backtest", "burn_model", "epic_forecast_vec", "burn_consum_default", "CATEGORY_ORDER",
-           "epic_monthly_avg", "compute_salary_cost", "allocation_startup_ids", "REBOOK_DEFAULT_CATEGORIES", "rebooking_candidates", "grant_rebook_room",
+           "epic_monthly_avg", "compute_salary_cost", "allocation_startup_ids",
            "interpolate_balance", "make_forecast_plot", "make_psp_forecast_plot")
 for (e in exprs) {
   if (is.call(e) && as.character(e[[1]]) %in% c("<-", "=")) {
@@ -326,22 +326,3 @@ kv <- tibble(id = c("S1", "S2", "G1", "K1"), typ = c("Startup", "Startup", "Gran
 ok("allocation startups exclude vouchers", identical(allocation_startup_ids(kv), "S2"))
 ok("allocation startups work without keep_all_vb column",
    identical(allocation_startup_ids(select(kv, -keep_all_vb)), c("S1", "S2")))
-
-# Rebooking helper: K1 rows of the selected year/categories; grant room to end
-dr <- d
-dr$ist_raw <- bind_rows(
-  dr$ist_raw |> mutate(buch_dat = month + 14, kurztext = "x", buchungstext = "y"),
-  tibble(id = "K1", month = as_date("2025-11-01"), buch_dat = as_date("2025-11-15"), category = "EPIC",
-         actual_spending = 999, actual_income = 0, kurztext = "old", buchungstext = "prev year"),
-  tibble(id = "G1", month = as_date("2026-03-01"), buch_dat = as_date("2026-03-10"), category = "EPIC",
-         actual_spending = 777, actual_income = 0, kurztext = "g", buchungstext = "on grant"))
-rc <- rebooking_candidates(dr, c("EPIC"), 2026)
-ok("rebook: only Kostenstelle rows of the year+category", nrow(rc) == 6 && all(rc$Konto == "K1") && sum(rc$CHF) == 9000)
-ok("rebook: none -> NULL", is.null(rebooking_candidates(dr, "Equipment", 2026)))
-dr$ist_monthly <- dr$ist_raw |> group_by(id, month) |>
-  summarise(actual_income = sum(actual_income), actual_spending = sum(actual_spending), .groups = "drop")
-rr <- grant_rebook_room(dr)
-# G1: balance -777, tranches 2*90570 (both before 2028-12-31), salary 6 mo x 4000 (Jul-Dec 2026),
-# other = 777/12 * months left (2026-06 -> 2028-12 = 30)
-exp_room <- -777 + 2 * 90570 - 6 * 4000 - 777 / 12 * 30
-ok("rebook room: balance + tranches - salary - other pace", nrow(rr) == 1 && abs(rr$`Room at end` - exp_room) < 1e-6)
