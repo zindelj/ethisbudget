@@ -1038,6 +1038,20 @@ load_all_data <- function(ep_path) {
 # ================================================================
 # Per-PSP plot (from 02_, minimal changes)
 # ================================================================
+# Year names along the top of a monthly panel (centred on each year's visible
+# months), so the Monitoring plots read like the Forecast / Salary plots.
+year_label_layer <- function(months) {
+  months <- as_date(months[!is.na(months)])
+  if (length(months) == 0) return(NULL)
+  rng <- range(months)
+  yl  <- tibble(year = seq(year(rng[1]), year(rng[2]))) |>
+    mutate(from = pmax(as_date(paste0(year, "-01-01")), rng[1]),
+           to   = pmin(as_date(paste0(year, "-12-01")), rng[2]),
+           x    = from + as.numeric(to - from) / 2)
+  geom_text(data = yl, aes(x = x, y = Inf, label = year), vjust = 1.4,
+            fontface = "bold", size = 4, inherit.aes = FALSE)
+}
+
 make_psp_plot <- function(psp_id, d) {
   konten          <- d$konten
   ist_monthly     <- d$ist_monthly
@@ -1105,6 +1119,7 @@ make_psp_plot <- function(psp_id, d) {
 
   p_income <- ggplot() +
     geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
+    year_label_layer(ts$month) +
     geom_col(data = income_long, aes(x = month, y = value, fill = series),
              position = "dodge", width = 25, alpha = 0.85) +
     scale_fill_brewer(palette = "Set2") +
@@ -1120,6 +1135,7 @@ make_psp_plot <- function(psp_id, d) {
 
   p_spending <- ggplot() +
     geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
+    year_label_layer(ts$month) +
     geom_col(data = cat_monthly, aes(x = month, y = value, fill = category),
              position = "stack", width = 25, alpha = 0.85) +
     geom_step(data = ts, aes(x = month, y = expected_burn),
@@ -1136,6 +1152,7 @@ make_psp_plot <- function(psp_id, d) {
 
   p_balance <- ggplot() +
     geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
+    year_label_layer(ts$month) +
     geom_line(data = ts, aes(x = month, y = actual_balance,   linetype = balance_label),
               linewidth = 1.2, na.rm = TRUE) +
     geom_line(data = ts, aes(x = month, y = expected_balance, linetype = "Expected balance"),
@@ -3141,6 +3158,7 @@ server <- function(input, output, session) {
 
     p_income <- ggplot() +
       geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
+      year_label_layer(ts$month) +
       geom_col(data = income_long, aes(x = month, y = value, fill = series),
                position = "dodge", width = 25, alpha = 0.85) +
       scale_fill_brewer(palette = "Set2") +
@@ -3160,6 +3178,7 @@ Data up to: ",
 
     p_spending <- ggplot() +
       geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
+      year_label_layer(ts$month) +
       geom_col(data = cat_monthly_all, aes(x = month, y = value, fill = category),
                position = "stack", width = 25, alpha = 0.85) +
       geom_step(data = ts, aes(x = month, y = expected_burn),
@@ -3176,6 +3195,7 @@ Data up to: ",
 
     p_balance <- ggplot() +
       geom_vline(data = year_lines, aes(xintercept = x), color = "black", linewidth = 0.4) +
+      year_label_layer(ts$month) +
       geom_line(data = ts, aes(x = month, y = balance), linewidth = 1.2) +
       geom_hline(yintercept = 0, color = "firebrick", linewidth = 0.6) +
       scale_x_date(date_breaks = "1 month", date_labels = "%b",
