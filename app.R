@@ -2493,6 +2493,41 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
 # UI
 # ================================================================
 # ================================================================
+# Month glance: one month's bookings, filtered by category pills
+# ================================================================
+# Pure helper (tested): the spending rows of one month for the given kontos.
+month_bookings <- function(ist_raw, month_sel, ids = NULL, categories = NULL) {
+  r <- ist_raw |> filter(!is.na(id), month == as_date(month_sel), actual_spending != 0)
+  if (length(ids)) r <- r |> filter(id %in% ids)
+  if (!is.null(categories)) r <- r |> filter(category %in% categories)
+  r |>
+    mutate(cat_ord = match(category, CATEGORY_ORDER)) |>
+    arrange(cat_ord, desc(abs(actual_spending))) |>
+    transmute(Datum = format(as_date(buch_dat), "%d.%m."), Konto = id, Kategorie = category,
+              Kurztext = kurztext, Buchungstext = buchungstext, CHF = actual_spending)
+}
+
+month_glance_ui <- function(scope) {
+  card(
+    class = "mb-2",
+    tags$style(HTML("
+      .cat-pills .checkbox-inline, .cat-pills .form-check-inline { margin: 0 4px 4px 0; padding-left: 0; }
+      .cat-pills input[type=checkbox] { position: absolute; opacity: 0; pointer-events: none; }
+      .cat-pills .pill { display: inline-block; border: 2px solid var(--c); border-radius: 999px;
+                         padding: 1px 10px; font-size: 0.82em; cursor: pointer; color: #333; background: #fff; }
+      .cat-pills input:checked + span > .pill, .cat-pills input:checked + .pill { background: var(--c); color: #fff; }
+      .month-tbl table { font-size: 0.82em; margin-bottom: 0; }
+    ")),
+    fluidRow(
+      column(3, uiOutput(paste0("mg_month_ui_", scope))),
+      column(9, div(class = "cat-pills", uiOutput(paste0("mg_pills_ui_", scope))))
+    ),
+    div(class = "month-tbl", style = "max-height: 320px; overflow-y: auto;",
+        tableOutput(paste0("mg_table_", scope)))
+  )
+}
+
+# ================================================================
 # Booking export (filtered EP rows → Excel, from the Monitoring tabs)
 # ================================================================
 # The EP rows the app works with (after VB filter, alias remap, Storno and
@@ -2609,6 +2644,7 @@ ui <- page_navbar(
       ),
       tagList(
         uiOutput("header_monitoring_psp"),
+        month_glance_ui("psp"),
         card(plotOutput("plot_monitoring", height = "1050px"))
       )
     )
@@ -2619,6 +2655,7 @@ ui <- page_navbar(
       sidebar = sidebar(export_box_ui("all"), notes_box_ui("all")),
       tagList(
         uiOutput("header_monitoring_all"),
+        month_glance_ui("all"),
         checkboxInput("mon_all_startup", "Include Startup / Voucher accounts (untick to see the grant categories without the Startup equipment)",
                       value = TRUE, width = "100%"),
         card(plotOutput("plot_monitoring_all", height = "1050px"))
@@ -2925,6 +2962,52 @@ server <- function(input, output, session) {
       arrange(id)
     selectInput("psp_id", "Select PSP",
                 choices = setNames(psp_ids$id, psp_ids$label))
+  })
+
+  # ── Month glance (Monitoring tabs) ───────────────────────────────────────
+  for (sc in c("psp", "all")) local({
+    scope <- sc
+    ids_now <- reactive(if (scope == "all") NULL else input$psp_id)
+    scope_rows <- reactive({
+      req(rv$data)
+      r <- rv$data$ist_raw |> filter(!is.na(id), !is.na(month), actual_spending != 0)
+      if (scope == "psp") { req(input$psp_id); r <- r |> filter(id == input$psp_id) }
+      r
+    })
+    output[[paste0("mg_month_ui_", scope)]] <- renderUI({
+      ms <- sort(unique(scope_rows()$month), decreasing = TRUE)
+      if (length(ms) == 0) return(helpText("No bookings yet."))
+      selectInput(paste0("mg_month_", scope), "Bookings in month",
+                  choices = setNames(as.character(ms), format(ms, "%b %Y")), selected = as.character(ms[1]))
+    })
+    month_rows <- reactive({
+      m <- input[[paste0("mg_month_", scope)]]; req(m)
+      month_bookings(scope_rows(), as_date(m), ids_now())
+    })
+    output[[paste0("mg_pills_ui_", scope)]] <- renderUI({
+      r <- month_rows()
+      if (nrow(r) == 0) return(NULL)
+      tot  <- r |> group_by(Kategorie) |> summarise(chf = sum(CHF), .groups = "drop") |>
+        arrange(match(Kategorie, CATEGORY_ORDER))
+      cols <- unname(CATEGORY_COLORS[tot$Kategorie]); cols[is.na(cols)] <- "#888888"
+      checkboxGroupInput(paste0("mg_cats_", scope), NULL, inline = TRUE,
+        choiceNames = lapply(seq_len(nrow(tot)), function(i)
+          tags$span(class = "pill", style = paste0("--c:", cols[i], ";"),
+                    paste0(tot$Kategorie[i], " · ", format(round(tot$chf[i]), big.mark = "'", trim = TRUE)))),
+        choiceValues = tot$Kategorie, selected = tot$Kategorie)
+    })
+    output[[paste0("mg_table_", scope)]] <- renderTable({
+      r <- month_rows()
+      if (nrow(r) == 0) return(NULL)
+      sel <- input[[paste0("mg_cats_", scope)]]
+      r <- r |> filter(Kategorie %in% (sel %||% character()))
+      if (nrow(r) == 0) return(data.frame(` ` = "No category selected", check.names = FALSE))
+      if (scope == "psp") r$Konto <- NULL
+      out <- r |> mutate(CHF = format(round(CHF), big.mark = "'", trim = TRUE))
+      tot <- as.list(rep("", ncol(out))); names(tot) <- names(out)
+      tot[[1]] <- "Total"; tot$CHF <- format(round(sum(r$CHF)), big.mark = "'", trim = TRUE)
+      bind_rows(out, as_tibble(tot))
+    }, striped = TRUE, spacing = "xs", align = "l")
   })
 
   # ── Booking export (Monitoring sidebars) ─────────────────────────────────

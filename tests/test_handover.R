@@ -124,5 +124,14 @@ chk("export: no filter = every booking, income marked", nrow(ex_all) == nrow(fil
 tf <- tempfile(fileext = ".xlsx"); writexl::write_xlsx(list(Bookings = ex), tf)
 chk("export: writes a readable xlsx", nrow(readxl::read_excel(tf)) == 3)
 
+# --- month glance -------------------------------------------------------------
+mb <- month_bookings(d$ist_raw, as_date("2025-03-01"))
+chk("month glance: all spending rows of the month, salary first",
+    nrow(mb) == 3 && mb$Kategorie[1] == "Salary" && sum(mb$CHF) == 9000 + 2500 + 6000)
+chk("month glance: konto + category filter",
+    nrow(month_bookings(d$ist_raw, as_date("2025-03-01"), ids = "1-234567", categories = "Consumables")) == 1)
+chk("month glance: income rows not shown",
+    nrow(month_bookings(d$ist_raw, as_date("2025-01-01"))) == 2)
+
 cat(sprintf("\n%d failure(s)\n", fails))
 if (fails > 0) quit(status = 1)
