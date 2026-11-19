@@ -6,7 +6,7 @@ suppressMessages({
 
 exprs <- parse("app.R")
 want  <- c("%||%", "canonical_id", "extract_zp_id", "parse_any_date", "read_zahlungsplan", "load_salaryplan", "filter_own_vb",
-           "write_salaryplan_xlsx", "salary_history", "notes_path", "read_note", "write_note")
+           "write_salaryplan_xlsx", "salary_history", "other_fallback_health", "notes_path", "read_note", "write_note")
 for (e in exprs) {
   if (is.call(e) && as.character(e[[1]]) %in% c("<-", "=")) {
     nm <- gsub("`", "", deparse(e[[2]]))
@@ -90,3 +90,12 @@ ok("empty note does not create a file", !write_note(nd, "1-000009", "") && !file
 txt <- "Zürich: Tranche verspätet\nline 2"
 write_note(nd, "1-008665", txt)
 ok("note round trip (multi-line, umlauts)", identical(read_note(nd, "1-008665"), txt))
+
+# ---- "Other" fallback notice -------------------------------------------------
+ir <- tibble(id = c("1-1", "1-1", "2-2", "2-2"), category = c("Other", "Other", "Other", "Consumables"),
+             kurztext = c("Diverses", "Diverses", "Rückerstattung", "Laborwaren"),
+             actual_spending = c(100, 50, -15000, 999))
+oh <- other_fallback_health(ir)
+ok("Other notice lists Kurztext per konto, biggest first",
+   length(oh) == 1 && grepl("^Other: 3 booking", oh) && grepl("'Rückerstattung' on 2-2 1x -15'000; 'Diverses' on 1-1 2x 150", oh))
+ok("no Other rows = no notice", length(other_fallback_health(ir[4, ])) == 0)

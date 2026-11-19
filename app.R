@@ -596,6 +596,26 @@ facility_fallback_health <- function(ist_raw) {
          ".")
 }
 
+# Same idea for "Other": rows whose Kurztext matches no CATEGORY_RULES entry
+# (or the explicit "mehrere" catch-all). Listed per Kurztext and konto so new
+# rules can be added instead of costs hiding in "Other".
+other_fallback_health <- function(ist_raw) {
+  fb <- ist_raw |>
+    filter(category == "Other", !is.na(id), actual_spending != 0) |>
+    mutate(kt = coalesce(str_squish(kurztext), "(empty)")) |>
+    group_by(kt, id) |>
+    summarise(n = n(), chf = sum(actual_spending, na.rm = TRUE), .groups = "drop") |>
+    arrange(desc(abs(chf)))
+  if (nrow(fb) == 0) return(character())
+  shown <- head(fb, 15)
+  paste0("Other: ", sum(fb$n), " booking(s) (net ", format(round(sum(fb$chf)), big.mark = "'"),
+         " CHF) have a Kurztext not mapped to any category: ",
+         paste0("'", shown$kt, "' on ", shown$id, " ", shown$n, "x ",
+                format(round(shown$chf), big.mark = "'"), collapse = "; "),
+         if (nrow(fb) > nrow(shown)) paste0("; … ", nrow(fb) - nrow(shown), " more") else "",
+         ".")
+}
+
 # ================================================================
 # Verantwortungsbereich (VB) filter
 # ================================================================
@@ -941,7 +961,8 @@ load_all_data <- function(ep_path) {
   # Collected here and surfaced on the Load Data tab so silent data loss
   # becomes visible instead of quietly skewing forecasts.
   health <- c(ep_health, aliased$notes, vb_filtered$notes, zp_health, attr(salary_plan, "health"),
-              mirrored_transfers$notes, storno_health(ist_raw), facility_fallback_health(ist_raw))
+              mirrored_transfers$notes, storno_health(ist_raw), facility_fallback_health(ist_raw),
+              other_fallback_health(ist_raw))
 
   inv_past <- investments |> filter(!is.na(reference_date), month <= reference_date)
   if (nrow(inv_past) > 0)
