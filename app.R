@@ -2179,6 +2179,8 @@ handover_wide_years <- function(df, rowvar) {
   w
 }
 
+HANDOVER_MIN_GROUP <- 3
+
 build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
                            stamp = format(Sys.Date(), "%Y%m%d"), window_months = 12) {
   ref  <- as_date(d$reference_date)
@@ -2254,19 +2256,30 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
              role  = coalesce(na_if(str_trim(as.character(role)), ""), "Other"),
              fte   = coalesce(fte, 1),
              Konto = coalesce(unname(lab[psp]), "(no PSP)"))
+    # Salary privacy: a role held by one or two people would expose their
+    # personal salary, so such roles are pooled as "Other staff" in the CHF
+    # tables, and CHF is shown only for groups of HANDOVER_MIN_GROUP+ people.
+    # (Team-size FTE by role, section 10, carries no money and keeps roles.)
+    small_roles <- spm |> group_by(role) |> summarise(n = n_distinct(name), .groups = "drop") |>
+      filter(n < HANDOVER_MIN_GROUP) |> pull(role)
+    spm <- spm |> mutate(role_grp = if_else(role %in% small_roles, "Other staff", role))
+    mask_chf <- function(df) df |>
+      mutate(across(starts_with("CHF"), ~ if_else(Persons >= HANDOVER_MIN_GROUP, .x, NA_real_)))
     role_year <- spm |>
-      group_by(Role = role, Year = year) |>
+      group_by(Role = role_grp, Year = year) |>
       summarise(Persons = n_distinct(name), `FTE-months` = sum(fte),
                 `CHF total` = sum(amount), .groups = "drop") |>
-      mutate(`CHF / FTE-month` = `CHF total` / `FTE-months`,
-             Status = case_when(Year < year(ref) ~ "past", Year > year(ref) ~ "planned",
+      mutate(`CHF / FTE-month` = if_else(`FTE-months` > 0, `CHF total` / `FTE-months`, NA_real_)) |>
+      mask_chf() |>
+      mutate(Status = case_when(Year < year(ref) ~ "past", Year > year(ref) ~ "planned",
                                 TRUE ~ "current year")) |>
       arrange(Role, Year) |>
       mutate(Year = as.character(Year))   # keep years out of the 1'000 formatting
     role_konto <- spm |>
-      group_by(Role = role, Konto) |>
+      group_by(Role = role_grp, Konto) |>
       summarise(Persons = n_distinct(name), `FTE-months` = sum(fte),
                 `CHF total` = sum(amount), .groups = "drop") |>
+      mask_chf() |>
       arrange(Role, Konto)
     fte_timeline <- spm |>
       filter(month(month) %in% c(1, 7)) |>
@@ -2339,9 +2352,14 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
                           handover_fmt(bm$backtest$actual), collapse = "; "))))),
     sec("7. Actual salary cost by konto and year (booked in SAP)", handover_md_table(sal_year)),
     sec("8. Salary plan by role and year (planned personnel, from Salaryplan.xlsx)",
-        c("Persons = distinct people in that role/year; CHF / FTE-month = planned monthly cost of one full-time position.", "",
+        c(paste0("Persons = distinct people in that role/year; CHF / FTE-month = planned monthly cost of one full-time position. ",
+                 "Roles held by fewer than ", HANDOVER_MIN_GROUP, " people are pooled as 'Other staff', and CHF is ",
+                 "shown only for groups of ", HANDOVER_MIN_GROUP, " or more people, so no individual salary can be read off. ",
+                 "Standard rates are in section 11."), "",
           handover_md_table(role_year))),
-    sec("9. Salary plan by role and funding konto", handover_md_table(role_konto)),
+    sec("9. Salary plan by role and funding konto",
+        c(paste0("Same pooling and masking as section 8 (CHF blank = fewer than ", HANDOVER_MIN_GROUP, " people)."), "",
+          handover_md_table(role_konto))),
     sec("10. Planned team size (FTE by role, each January and July)", handover_md_table(fte_timeline)),
     sec("11. Salary scale (Lohntabelle: standard rates by role and year)", handover_md_table(lohn_tbl)),
     sec("12. Planned income by konto and year (Zahlungsplan)", handover_md_table(zp_year)),
@@ -2375,6 +2393,12 @@ build_handover <- function(d, out_dir = d$raw_dir, include_konto_names = FALSE,
       hits <- c(hits, paste0("'", f, "' — ", str_count(text, pat), "x"))
       text <- str_replace_all(text, pat, "[redacted]")
     }
+  }
+  # an initial left in front of a redacted surname ("J. [redacted]")
+  pat_init <- "(?<![A-Za-zÀ-ÿ])[A-ZÀ-Ý]\\.\\s*\\[redacted\\]"
+  if (str_detect(text, pat_init)) {
+    hits <- c(hits, paste0("initial before a redacted name — ", str_count(text, pat_init), "x"))
+    text <- str_replace_all(text, pat_init, "[redacted]")
   }
   for (pat in c("\\bCH\\d{2}(?:\\s?[A-Za-z0-9]{4}){4,5}\\b", "(?<![\\d'])\\d{5,}(?![\\d'])")) {
     n <- str_count(text, pat)

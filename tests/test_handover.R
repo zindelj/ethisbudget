@@ -92,5 +92,23 @@ chk("Bezeichnung included on request", str_detect(md2, "Immunology"))
 chk("person token inside Bezeichnung still redacted", !str_detect(md2, "Muster"))
 chk("Bezeichnung scrub reported in key", res2$scrub_hits >= 2)
 
+
+# --- salary privacy: no individual salary readable --------------------------
+# both roles have ONE person each → pooled as "Other staff" (2 people) → CHF masked
+sec8_9 <- str_extract(md, "(?s)## 8\\..*?## 10\\.")
+chk("small roles pooled as 'Other staff'", str_detect(sec8_9, "Other staff"))
+chk("no per-person planned salary (7'500 / 9'800 / totals)",
+    !str_detect(sec8_9, "7'500|9'800|90'000|117'600|270'000|176'400"))
+chk("single-person roles not named in salary-plan CHF tables",
+    !str_detect(sec8_9, "\\| PhD Student \\||\\| Postdoc \\|"))
+chk("no Inf in output", !str_detect(md, "\\bInf\\b"))
+
+# --- an initial in front of a redacted surname is removed too ---------------
+d3 <- d
+d3$konten$bezeichnung[d3$konten$id == "29870"] <- "Startup B. Beispiel"
+md3 <- paste(readLines(build_handover(d3, include_konto_names = TRUE, stamp = "test_init")$md,
+                       encoding = "UTF-8"), collapse = "\n")
+chk("no initial left before [redacted]", !str_detect(md3, "B\\.\\s*\\[redacted\\]") && str_detect(md3, "Startup \\[redacted\\]"))
+
 cat(sprintf("\n%d failure(s)\n", fails))
 if (fails > 0) quit(status = 1)
